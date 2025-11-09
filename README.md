@@ -18,6 +18,7 @@ This toolkit collects comprehensive diagnostics for AWS EKS pods using Security 
 - **Route Table Drift Analysis**: Detects missing or incorrect routes (default route, subnet routes, metadata service route), validates route consistency, and identifies routing issues
 - **Health Probe Analysis**: Analyzes health probe configurations (liveness, readiness, startup), verifies probe ports are listening, checks for probe failures, and validates network access from kubelet
 - **NetworkPolicy Analysis**: Analyzes NetworkPolicies to detect if they block DNS, health probes, metrics, or service traffic, validates podSelector matches, and checks for missing egress rules
+- **DNS / CoreDNS / NodeLocal DNSCache Analysis**: Analyzes DNS infrastructure, CoreDNS pod status and scaling, NodeLocal DNSCache presence and configuration, DNS service endpoints, and DNS resolution tests
 - **Connectivity Analysis**: Advanced analysis for pod connectivity issues after large churns, including ENI attachment timing, subnet IP availability, CNI log errors, and SYN_SENT connection detection (identifies pods trying to connect but waiting for ACK)
 - **AWS ENI State**: Captures trunk and branch ENI information, subnet IP availability, and instance type details
 - **API Diagnostics**: Analyzes CloudTrail events for ENI-related throttles and errors (with dry-run detection)
@@ -40,6 +41,7 @@ Detailed documentation for each diagnostic check is available in the [`doc/`](do
 - [Route Table Drift](doc/17-route-table-drift.md)
 - [Health Probes](doc/18-health-probes.md)
 - [Network Policies](doc/19-network-policies.md)
+- [DNS / CoreDNS / NodeLocal DNSCache](doc/20-dns-coredns-nodelocal.md)
 - [Security Group Validation](doc/05-security-group-validation.md)
 - [Network Namespace Leaks](doc/06-network-namespace-leaks.md)
 - [DNS Resolution](doc/08-dns-resolution.md)
@@ -161,6 +163,12 @@ sgfp_bundle_<pod>_<timestamp>/
     node_all_ips.txt                       # All IP addresses on node
     node_duplicate_ips.txt                 # Duplicate IP addresses (if any)
     node_dns_tests.txt                     # DNS resolution tests
+    node_coredns_pods.json                 # CoreDNS pod status
+    node_nodelocal_dns_pods.json           # NodeLocal DNSCache pod status
+    node_dns_service.json                  # DNS service configuration
+    node_dns_endpoints.json                # DNS service endpoints
+    node_nodelocal_dns_service.json        # NodeLocal DNSCache service (if enabled)
+    node_coredns_config.json               # CoreDNS configuration
     node_file_descriptors.txt              # File descriptor usage
     node_memory_info.txt                   # Memory information
     node_k8s_networkpolicies.json          # Kubernetes NetworkPolicies
@@ -249,6 +257,9 @@ Collects node-level diagnostics: conntrack usage, interface error statistics, so
 - Analyzes network namespaces for leaks (orphaned namespaces with no interfaces, only flags as issue if older than 1 hour)
 - Detects IP address conflicts (duplicate IPs on node)
 - Tests DNS resolution (Kubernetes DNS, metadata service)
+- Collects CoreDNS pod status and configuration
+- Collects NodeLocal DNSCache pod status (if enabled)
+- Collects DNS service endpoints and configuration
 - Checks for resource exhaustion (file descriptors, memory pressure)
 - Collects network policy rules (Kubernetes and CNI-specific: Calico, Cilium)
 - Checks network interface states (interfaces in unexpected DOWN state)
@@ -346,6 +357,7 @@ Advanced analysis for diagnosing pod connectivity issues, especially after large
 - **Route Table Drift Analysis**: Validates default route, subnet routes, metadata service route, and route consistency
 - **Health Probe Analysis**: Analyzes probe configurations, verifies probe ports are listening, checks for probe failures, and validates network access
 - **NetworkPolicy Analysis**: Analyzes NetworkPolicies to detect if they block DNS, health probes, metrics, or service traffic
+- **DNS / CoreDNS / NodeLocal DNSCache Analysis**: Analyzes CoreDNS pod status and scaling, NodeLocal DNSCache presence, DNS service endpoints, and DNS resolution
 - **ENI/Instance Limits Analysis**: Checks instance type ENI/IP limits, current usage, trunk ENI branch ENI count, and estimates max pods
 - Checks IPAMD state and branch ENI limits
 - Validates subnet IP availability

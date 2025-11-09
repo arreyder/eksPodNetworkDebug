@@ -901,14 +901,93 @@ if [ -n "$POD_DIR" ] && [ -s "$POD_DIR/pod_full.json" ]; then
   fi
 fi
 
-# DNS resolution
-if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_dns_tests.txt" ]; then
+# DNS / CoreDNS / NodeLocal DNSCache analysis
+if [ -n "$NODE_DIR" ]; then
   echo >> "$REPORT"
-  K8S_DNS_FAILED=$(grep -A 5 "kubernetes.default.svc.cluster.local" "$NODE_DIR/node_dns_tests.txt" 2>/dev/null | grep -qi "FAILED" && echo "1" || echo "0")
-  if [ "$K8S_DNS_FAILED" = "1" ]; then
-    say "[ISSUE] Kubernetes DNS resolution failed"
-  else
-    say "[OK] DNS resolution tests passed"
+  say "[INFO] DNS / CoreDNS / NodeLocal DNSCache analysis:"
+  
+  # DNS resolution test
+  if [ -s "$NODE_DIR/node_dns_tests.txt" ]; then
+    K8S_DNS_FAILED=$(grep -A 5 "kubernetes.default.svc.cluster.local" "$NODE_DIR/node_dns_tests.txt" 2>/dev/null | grep -qi "FAILED" && echo "1" || echo "0")
+    if [ "$K8S_DNS_FAILED" = "1" ]; then
+      say "[ISSUE] Kubernetes DNS resolution failed"
+    else
+      say "[OK] DNS resolution tests passed"
+    fi
+  fi
+  
+  # CoreDNS status
+  if [ -s "$NODE_DIR/node_coredns_pods.json" ]; then
+    COREDNS_COUNT=$(jq -r '.items | length' "$NODE_DIR/node_coredns_pods.json" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    if [ "$COREDNS_COUNT" = "0" ]; then
+      say "[ISSUE] No CoreDNS pods found"
+    else
+      COREDNS_READY=0
+      NP_INDEX=0
+      while [ "$NP_INDEX" -lt "$COREDNS_COUNT" ]; do
+        READY_COUNT=$(jq -r --argjson idx "$NP_INDEX" '[.items[$idx].status.containerStatuses[]? | select(.ready == true)] | length' "$NODE_DIR/node_coredns_pods.json" 2>/dev/null || echo "0")
+        TOTAL_CONTAINERS=$(jq -r --argjson idx "$NP_INDEX" '.items[$idx].status.containerStatuses | length' "$NODE_DIR/node_coredns_pods.json" 2>/dev/null || echo "0")
+        if [ "$READY_COUNT" = "$TOTAL_CONTAINERS" ] && [ "$TOTAL_CONTAINERS" != "0" ]; then
+          COREDNS_READY=$((COREDNS_READY + 1))
+        fi
+        NP_INDEX=$((NP_INDEX + 1))
+      done
+      
+      if [ "$COREDNS_READY" = "$COREDNS_COUNT" ]; then
+        say "[OK] CoreDNS: $COREDNS_COUNT pod(s), all ready"
+      else
+        say "[WARN] CoreDNS: $COREDNS_COUNT pod(s), $COREDNS_READY ready"
+      fi
+      
+      if [ "$COREDNS_COUNT" -lt 2 ]; then
+        say "[WARN] Only $COREDNS_COUNT CoreDNS pod(s) - consider scaling to 2+ for HA"
+      fi
+    fi
+  fi
+  
+  # NodeLocal DNSCache status
+  if [ -s "$NODE_DIR/node_nodelocal_dns_pods.json" ]; then
+    NODELOCAL_COUNT=$(jq -r '.items | length' "$NODE_DIR/node_nodelocal_dns_pods.json" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    if [ "$NODELOCAL_COUNT" = "0" ]; then
+      say "[INFO] NodeLocal DNSCache: not enabled (optional)"
+    else
+      NODE_NAME=$(grep "^NODE=" "$POD_DIR/node_name.txt" 2>/dev/null | cut -d= -f2- || echo "")
+      NODELOCAL_ON_NODE=0
+      if [ -n "$NODE_NAME" ]; then
+        NP_INDEX=0
+        while [ "$NP_INDEX" -lt "$NODELOCAL_COUNT" ]; do
+          POD_NODE=$(jq -r --argjson idx "$NP_INDEX" '.items[$idx].spec.nodeName // ""' "$NODE_DIR/node_nodelocal_dns_pods.json" 2>/dev/null || echo "")
+          if [ "$POD_NODE" = "$NODE_NAME" ]; then
+            NODELOCAL_ON_NODE=$((NODELOCAL_ON_NODE + 1))
+          fi
+          NP_INDEX=$((NP_INDEX + 1))
+        done
+      fi
+      
+      if [ "$NODELOCAL_ON_NODE" -gt 0 ]; then
+        say "[OK] NodeLocal DNSCache: $NODELOCAL_ON_NODE pod(s) on this node"
+      else
+        say "[WARN] NodeLocal DNSCache: enabled but no pod on this node"
+      fi
+    fi
+  fi
+  
+  # DNS service endpoints
+  if [ -s "$NODE_DIR/node_dns_endpoints.json" ]; then
+    ENDPOINT_COUNT=$(jq -r '.subsets[0].addresses | length' "$NODE_DIR/node_dns_endpoints.json" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    if [ "$ENDPOINT_COUNT" = "0" ]; then
+      say "[ISSUE] DNS service has no endpoints"
+    else
+      say "[OK] DNS service has $ENDPOINT_COUNT endpoint(s)"
+    fi
+  fi
+  
+  # DNS service IP
+  if [ -s "$NODE_DIR/node_dns_service.json" ]; then
+    DNS_SERVICE_IP=$(jq -r '.spec.clusterIP // ""' "$NODE_DIR/node_dns_service.json" 2>/dev/null || echo "")
+    if [ -n "$DNS_SERVICE_IP" ] && [ "$DNS_SERVICE_IP" != "null" ] && [ "$DNS_SERVICE_IP" != "" ]; then
+      say "[INFO] DNS service IP: $DNS_SERVICE_IP"
+    fi
   fi
 fi
 

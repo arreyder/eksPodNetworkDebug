@@ -603,6 +603,34 @@ if command -v nslookup >/dev/null 2>&1 || command -v host >/dev/null 2>&1; then
   log "Collected DNS resolution tests"
 fi
 
+# DNS service and CoreDNS/NodeLocal DNSCache status
+log "Collecting DNS service and CoreDNS/NodeLocal DNSCache information..."
+if command -v kubectl >/dev/null 2>&1; then
+  # CoreDNS pods
+  kubectl get pods -n kube-system -l k8s-app=kube-dns -o json > "$OUT/node_coredns_pods.json" 2>/dev/null || echo '{"items":[]}' > "$OUT/node_coredns_pods.json"
+  COREDNS_COUNT=$(jq -r '.items | length' "$OUT/node_coredns_pods.json" 2>/dev/null | tr -d '[:space:]' || echo "0")
+  log "Found $COREDNS_COUNT CoreDNS pod(s)"
+  
+  # NodeLocal DNSCache pods
+  kubectl get pods -n kube-system -l k8s-app=node-local-dns -o json > "$OUT/node_nodelocal_dns_pods.json" 2>/dev/null || echo '{"items":[]}' > "$OUT/node_nodelocal_dns_pods.json"
+  NODELOCAL_COUNT=$(jq -r '.items | length' "$OUT/node_nodelocal_dns_pods.json" 2>/dev/null | tr -d '[:space:]' || echo "0")
+  log "Found $NODELOCAL_COUNT NodeLocal DNSCache pod(s)"
+  
+  # DNS service (kube-dns)
+  kubectl get svc -n kube-system kube-dns -o json > "$OUT/node_dns_service.json" 2>/dev/null || echo '{}' > "$OUT/node_dns_service.json"
+  
+  # DNS service endpoints
+  kubectl get endpoints -n kube-system kube-dns -o json > "$OUT/node_dns_endpoints.json" 2>/dev/null || echo '{}' > "$OUT/node_dns_endpoints.json"
+  
+  # NodeLocal DNSCache service (if exists)
+  kubectl get svc -n kube-system node-local-dns -o json > "$OUT/node_nodelocal_dns_service.json" 2>/dev/null || echo '{}' > "$OUT/node_nodelocal_dns_service.json"
+  
+  # DNS ConfigMap (CoreDNS config)
+  kubectl get configmap -n kube-system coredns -o json > "$OUT/node_coredns_config.json" 2>/dev/null || echo '{}' > "$OUT/node_coredns_config.json"
+  
+  log "Collected DNS service and CoreDNS/NodeLocal DNSCache information"
+fi
+
 # Resource exhaustion checks
 log "Checking for resource exhaustion..."
 # File descriptors
