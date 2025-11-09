@@ -13,6 +13,7 @@ This toolkit collects comprehensive diagnostics for AWS EKS pods using Security 
 - **Connectivity Analysis**: Advanced analysis for pod connectivity issues after large churns, including ENI attachment timing, subnet IP availability, and CNI log errors
 - **AWS ENI State**: Captures trunk and branch ENI information, subnet IP availability
 - **API Diagnostics**: Analyzes CloudTrail events for ENI-related throttles and errors (with dry-run detection)
+- **Quick Status Check**: Fast validation script to check pod ENI status without full collection
 - **Log Files Summary**: Report includes concise summary of all log files with error counts and file paths
 - **View Related Logs Helper**: Helper script to easily view pod-specific log lines from collected bundles
 - **Node Debug Pod**: Helper script to create debug pods on nodes (supports pod name or node name)
@@ -316,6 +317,25 @@ Helper script to view pod-specific log lines from a diagnostic bundle.
 - Three modes: default (pod-related), errors-only, or all-logs
 - Shows which search patterns are being used
 
+### `sgfp_quick_check.sh` - Quick Status Check
+Quick validation script for pod ENI status without full diagnostic collection.
+
+```bash
+# Check pod in default namespace
+./sgfp_quick_check.sh <pod-name>
+
+# Check pod in specific namespace
+./sgfp_quick_check.sh <namespace> <pod-name>
+```
+
+**Features:**
+- Validates pod ENI annotation is present and correct
+- Compares pod IP with CNI status IP
+- Shows branch ENI ID and trunk association ID
+- Displays requested vs actual Security Groups
+- Provides quick PASS/WARN result
+- No diagnostic collection required (fast check)
+
 ## Security Group Validation
 
 The toolkit automatically validates Security Groups by:
@@ -361,6 +381,7 @@ make analyze-connectivity BUNDLE=<dir> # Connectivity analysis
 make doctor POD=<pod> NS=default       # All-in-one
 make node-debug TARGET=<pod|node>      # Create debug pod on node
 make view-logs BUNDLE=<dir>            # View pod-related log lines
+make quick-check POD=<pod> NS=default  # Quick pod ENI status check
 make clean                             # Remove all diagnostic output directories
 make clean-debug-pods NS=<namespace>   # Clean up debug pods interactively
 ```

@@ -1,5 +1,5 @@
 
-.PHONY: collect api report analyze doctor clean clean-debug-pods node-debug view-logs
+.PHONY: collect api report analyze doctor clean clean-debug-pods node-debug view-logs quick-check
 
 NS ?= default
 POD ?=
@@ -44,3 +44,7 @@ node-debug:
 view-logs:
 	@[ -n "$(BUNDLE)" ] || (echo "BUNDLE required: make view-logs BUNDLE=<bundle-dir> [OPTIONS=--errors-only|--all-logs]"; exit 1)
 	@./sgfp_view_logs.sh $(BUNDLE) $(OPTIONS)
+
+quick-check:
+	@[ -n "$(POD)" ] || (echo "POD required: make quick-check POD=<pod> [NS=default]"; exit 1)
+	@./sgfp_quick_check.sh $(NS) $(POD)
