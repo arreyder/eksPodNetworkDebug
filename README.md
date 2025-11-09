@@ -13,7 +13,7 @@ This toolkit collects comprehensive diagnostics for AWS EKS pods using Security 
 - **Connectivity Analysis**: Advanced analysis for pod connectivity issues after large churns, including ENI attachment timing, subnet IP availability, and CNI log errors
 - **AWS ENI State**: Captures trunk and branch ENI information, subnet IP availability
 - **API Diagnostics**: Analyzes CloudTrail events for ENI-related throttles and errors (with dry-run detection)
-- **Quick Status Check**: Fast validation script to check pod ENI status without full collection
+- **Quick Status Check**: Fast validation script to check pod ENI status without full collection (includes optional network connections display)
 - **Log Files Summary**: Report includes concise summary of all log files with error counts and file paths
 - **View Related Logs Helper**: Helper script to easily view pod-specific log lines from collected bundles
 - **Node Debug Pod**: Helper script to create debug pods on nodes (supports pod name or node name)
@@ -325,14 +325,25 @@ Quick validation script for pod ENI status without full diagnostic collection.
 ./sgfp_quick_check.sh <pod-name>
 
 # Check pod in specific namespace
-./sgfp_quick_check.sh <namespace> <pod-name>
+./sgfp_quick_check.sh -n <namespace> <pod-name>
+
+# Show network connections (pod-level and node-level conntrack)
+./sgfp_quick_check.sh -c <pod-name>
+./sgfp_quick_check.sh --connections -n <namespace> <pod-name>
 ```
 
 **Features:**
 - Validates pod ENI annotation is present and correct
 - Compares pod IP with CNI status IP
 - Shows branch ENI ID and trunk association ID
-- Displays requested vs actual Security Groups
+- Displays requested vs actual Security Groups with names and descriptions
+- **Network Connections** (with `--connections` or `-c` flag):
+  - Pod network connections (listening ports and established connections from pod's perspective)
+  - Conntrack connections (node-level, filtered by pod IP) showing both inbound TO pod and outbound FROM pod
+  - Inbound/outbound connection counts
+  - Same-node vs cross-node vs external connection identification
+  - Connection states (ESTABLISHED, CLOSE, TIME_WAIT, etc.)
+  - Automatically creates temporary privileged pod for conntrack access if needed
 - Provides quick PASS/WARN result
 - No diagnostic collection required (fast check)
 
