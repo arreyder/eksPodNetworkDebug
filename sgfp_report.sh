@@ -936,6 +936,34 @@ if [ -n "$NODE_DIR" ]; then
       say "  - NAT table: not available"
     fi
     
+    # kube-proxy analysis
+    KUBE_SERVICES_NAT=$(grep -c "^Chain KUBE-SERVICES" "$NODE_IPTABLES_NAT" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    KUBE_SERVICES_FILTER=$(grep -c "^Chain KUBE-SERVICES" "$NODE_IPTABLES_FILTER" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    KUBE_IPVS=$(grep -c "^Chain KUBE-IPVS" "$NODE_IPTABLES_FILTER" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    
+    if [ "$KUBE_IPVS" -gt 0 ]; then
+      say "[INFO] kube-proxy mode: IPVS (KUBE-IPVS chains detected)"
+    elif [ "$KUBE_SERVICES_NAT" -gt 0 ] || [ "$KUBE_SERVICES_FILTER" -gt 0 ]; then
+      say "[OK] kube-proxy mode: iptables"
+      
+      # Check if KUBE-SERVICES is active (has packet counts)
+      if [ -s "$NODE_IPTABLES_NAT" ]; then
+        KUBE_SERVICES_RULES=$(grep "KUBE-SERVICES" "$NODE_IPTABLES_NAT" 2>/dev/null | grep -E "^[[:space:]]*[0-9]+[KM]?" | wc -l | tr -d '[:space:]' || echo "0")
+        if [ -n "$KUBE_SERVICES_RULES" ] && [ "$KUBE_SERVICES_RULES" != "0" ] && [ "$KUBE_SERVICES_RULES" -gt 0 ] 2>/dev/null; then
+          SAMPLE_PKTS=$(grep "KUBE-SERVICES" "$NODE_IPTABLES_NAT" 2>/dev/null | grep -E "^[[:space:]]*[0-9]+[KM]?" | head -1 | awk '{print $1}' || echo "0")
+          say "  - KUBE-SERVICES chain active ($KUBE_SERVICES_RULES rule(s) with traffic, sample: $SAMPLE_PKTS packets)"
+        else
+          say "[WARN] KUBE-SERVICES chain has no packet counts (kube-proxy may not be processing traffic)"
+        fi
+      fi
+      
+      # Check masquerade rules
+      MASQ_RULES=$(grep -iE "MASQUERADE|KUBE-MARK-MASQ" "$NODE_IPTABLES_NAT" 2>/dev/null | grep -E "^[[:space:]]+[0-9]+" | wc -l | tr -d '[:space:]' || echo "0")
+      if [ "$MASQ_RULES" -gt 0 ]; then
+        say "  - Masquerade rules: $MASQ_RULES rule(s) (required for service traffic)"
+      fi
+    fi
+    
     # Check for pod-specific iptables rules
     POD_IP=$(grep "^POD_IP=" "$POD_IP_FILE" 2>/dev/null | cut -d= -f2- || echo "")
     VETH_NAME=$(cat "$POD_VETH" 2>/dev/null | tr -d '[:space:]' || echo "")

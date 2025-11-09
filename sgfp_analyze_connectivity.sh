@@ -21,6 +21,9 @@ fi
 issues=0
 warnings=0
 
+# Get pod IP for analysis
+POD_IP=$(grep "^POD_IP=" "$POD_DIR/pod_ip.txt" 2>/dev/null | cut -d= -f2- || echo "unknown")
+
 echo ""
 echo "=== ENI Attachment Analysis ==="
 
@@ -534,6 +537,88 @@ if [ -n "$NODE_DIR" ]; then
   fi
   
   rm -f "$MTU_TMP" 2>/dev/null || true
+fi
+
+# kube-proxy iptables analysis
+if [ -n "$NODE_DIR" ]; then
+  echo ""
+  echo "=== kube-proxy iptables Analysis ==="
+  
+  KUBE_PROXY_ISSUES=0
+  NODE_IPTABLES_FILTER="${NODE_DIR}/node_iptables_filter.txt"
+  NODE_IPTABLES_NAT="${NODE_DIR}/node_iptables_nat.txt"
+  
+  if [ -s "$NODE_IPTABLES_FILTER" ] || [ -s "$NODE_IPTABLES_NAT" ]; then
+    # Check for kube-proxy chains
+    KUBE_SERVICES_FILTER=$(grep -c "^Chain KUBE-SERVICES" "$NODE_IPTABLES_FILTER" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    KUBE_SERVICES_NAT=$(grep -c "^Chain KUBE-SERVICES" "$NODE_IPTABLES_NAT" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    KUBE_NODEPORTS=$(grep -c "^Chain KUBE-NODEPORTS" "$NODE_IPTABLES_FILTER" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    KUBE_MARK_MASQ=$(grep -c "^Chain KUBE-MARK-MASQ" "$NODE_IPTABLES_NAT" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    
+    # Check for IPVS mode (would have KUBE-IPVS chains or no kube-proxy chains)
+    KUBE_IPVS=$(grep -c "^Chain KUBE-IPVS" "$NODE_IPTABLES_FILTER" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    
+    if [ "$KUBE_IPVS" -gt 0 ]; then
+      echo "[INFO] kube-proxy running in IPVS mode (KUBE-IPVS chains detected)"
+    elif [ "$KUBE_SERVICES_NAT" -gt 0 ] || [ "$KUBE_SERVICES_FILTER" -gt 0 ]; then
+      echo "[OK] kube-proxy running in iptables mode"
+      
+      # Check if chains are being used (have packet counts > 0)
+      # Packet counts may have K/M suffixes (e.g., "2668K" = 2,668,000)
+      if [ -s "$NODE_IPTABLES_NAT" ]; then
+        # Check for any KUBE-SERVICES rules with packet counts (lines starting with numbers, possibly with K/M)
+        KUBE_SERVICES_RULES=$(grep "KUBE-SERVICES" "$NODE_IPTABLES_NAT" 2>/dev/null | grep -E "^[[:space:]]*[0-9]+[KM]?" | wc -l | tr -d '[:space:]' || echo "0")
+        if [ -n "$KUBE_SERVICES_RULES" ] && [ "$KUBE_SERVICES_RULES" != "0" ] && [ "$KUBE_SERVICES_RULES" -gt 0 ] 2>/dev/null; then
+          # Get a sample packet count for display
+          SAMPLE_PKTS=$(grep "KUBE-SERVICES" "$NODE_IPTABLES_NAT" 2>/dev/null | grep -E "^[[:space:]]*[0-9]+[KM]?" | head -1 | awk '{print $1}' || echo "0")
+          echo "[OK] KUBE-SERVICES chain active ($KUBE_SERVICES_RULES rule(s) with traffic, sample: $SAMPLE_PKTS packets)"
+        else
+          echo "[WARN] KUBE-SERVICES chain has no packet counts (may indicate kube-proxy not processing traffic)"
+          warnings=$((warnings+1))
+          KUBE_PROXY_ISSUES=1
+        fi
+      fi
+      
+      if [ "$KUBE_NODEPORTS" -gt 0 ]; then
+        echo "[OK] KUBE-NODEPORTS chain present"
+      fi
+      
+      if [ "$KUBE_MARK_MASQ" -gt 0 ]; then
+        KUBE_MARK_MASQ_REFS=$(grep "^Chain KUBE-MARK-MASQ" "$NODE_IPTABLES_NAT" 2>/dev/null | grep -oE "\([0-9]+ references\)" | grep -oE "[0-9]+" | head -1 || echo "0")
+        echo "[OK] KUBE-MARK-MASQ chain present ($KUBE_MARK_MASQ_REFS references)"
+      fi
+      
+      # Check for masquerade rules (required for service traffic)
+      MASQ_RULES=$(grep -iE "MASQUERADE|KUBE-MARK-MASQ" "$NODE_IPTABLES_NAT" 2>/dev/null | grep -E "^[[:space:]]+[0-9]+" | wc -l | tr -d '[:space:]' || echo "0")
+      if [ "$MASQ_RULES" -gt 0 ]; then
+        echo "[OK] Found $MASQ_RULES masquerade rule(s) (required for service traffic)"
+      else
+        echo "[WARN] No masquerade rules found - service traffic may not work correctly"
+        warnings=$((warnings+1))
+        KUBE_PROXY_ISSUES=1
+      fi
+      
+      # Check for pod-specific service rules (we already check this in report, but summarize here)
+      if [ -n "$POD_IP" ] && [ "$POD_IP" != "unknown" ]; then
+        POD_SERVICE_RULES=$(grep -i "$POD_IP" "$NODE_IPTABLES_NAT" 2>/dev/null | grep -E "^[[:space:]]+[0-9]+" | wc -l | tr -d '[:space:]' || echo "0")
+        if [ "$POD_SERVICE_RULES" -gt 0 ]; then
+          echo "[OK] Found $POD_SERVICE_RULES iptables rule(s) for pod IP $POD_IP (service rules present)"
+        else
+          echo "[INFO] No iptables service rules found for pod IP $POD_IP (pod may not be part of a service)"
+        fi
+      fi
+    else
+      echo "[WARN] kube-proxy chains not found - kube-proxy may not be running or using different mode"
+      warnings=$((warnings+1))
+      KUBE_PROXY_ISSUES=1
+    fi
+  else
+    echo "[INFO] iptables rules not available for kube-proxy analysis"
+  fi
+  
+  if [ "$KUBE_PROXY_ISSUES" -eq 0 ]; then
+    echo "[OK] No kube-proxy iptables issues detected"
+  fi
 fi
 
 echo ""
