@@ -299,6 +299,129 @@ if [ -n "$NODE_CNI_LOGS_DIR" ] && [ -d "$NODE_CNI_LOGS_DIR" ]; then
   fi
 fi
 
+# Network namespace analysis
+if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_netns_details.json" ]; then
+  if jq -e 'length > 0' "$NODE_DIR/node_netns_details.json" >/dev/null 2>&1; then
+    echo >> "$REPORT"
+    NETNS_COUNT=$(jq -r 'length' "$NODE_DIR/node_netns_details.json" 2>/dev/null || echo "0")
+    EMPTY_NS=$(jq -r '[.[] | select(.interface_count == 0)] | length' "$NODE_DIR/node_netns_details.json" 2>/dev/null || echo "0")
+    say "[INFO] Network namespaces: $NETNS_COUNT total"
+    if [ "$EMPTY_NS" != "0" ]; then
+      say "[ISSUE] Found $EMPTY_NS network namespace(s) with no interfaces (potential leaks)"
+    fi
+  fi
+fi
+
+# IP address conflicts
+if [ -n "$NODE_DIR" ] && [ -f "$NODE_DIR/node_duplicate_ips.txt" ]; then
+  if [ -s "$NODE_DIR/node_duplicate_ips.txt" ] && grep -q '[^[:space:]]' "$NODE_DIR/node_duplicate_ips.txt" 2>/dev/null; then
+    echo >> "$REPORT"
+    say "[ISSUE] IP address conflicts detected:"
+    grep '[^[:space:]]' "$NODE_DIR/node_duplicate_ips.txt" | sed 's/^/  - /' >> "$REPORT" 2>/dev/null || true
+  fi
+fi
+
+# DNS resolution
+if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_dns_tests.txt" ]; then
+  echo >> "$REPORT"
+  K8S_DNS_FAILED=$(grep -A 5 "kubernetes.default.svc.cluster.local" "$NODE_DIR/node_dns_tests.txt" 2>/dev/null | grep -qi "FAILED" && echo "1" || echo "0")
+  if [ "$K8S_DNS_FAILED" = "1" ]; then
+    say "[ISSUE] Kubernetes DNS resolution failed"
+  else
+    say "[OK] DNS resolution tests passed"
+  fi
+fi
+
+# Resource exhaustion
+if [ -n "$NODE_DIR" ]; then
+  echo >> "$REPORT"
+  say "[INFO] Resource usage:"
+  
+  # File descriptors
+  if [ -s "$NODE_DIR/node_file_descriptors.txt" ]; then
+    ALLOCATED=$(awk '{print $1}' "$NODE_DIR/node_file_descriptors.txt" 2>/dev/null || echo "0")
+    MAX=$(awk '{print $3}' "$NODE_DIR/node_file_descriptors.txt" 2>/dev/null || echo "0")
+    if [ "$MAX" != "0" ] && [ "$ALLOCATED" != "0" ]; then
+      USAGE_PCT=$((ALLOCATED * 100 / MAX))
+      if [ "$USAGE_PCT" -gt 80 ]; then
+        say "[ISSUE] File descriptors: $ALLOCATED / $MAX (~$USAGE_PCT%)"
+      else
+        say "[OK] File descriptors: $ALLOCATED / $MAX (~$USAGE_PCT%)"
+      fi
+    fi
+  fi
+  
+  # Memory
+  if [ -s "$NODE_DIR/node_memory_info.txt" ]; then
+    MEM_AVAILABLE=$(grep "^MemAvailable:" "$NODE_DIR/node_memory_info.txt" 2>/dev/null | awk '{print $2}' || echo "0")
+    MEM_TOTAL=$(grep "^MemTotal:" "$NODE_DIR/node_memory_info.txt" 2>/dev/null | awk '{print $2}' || echo "0")
+    if [ "$MEM_TOTAL" != "0" ] && [ "$MEM_AVAILABLE" != "0" ]; then
+      MEM_USAGE_PCT=$(((MEM_TOTAL - MEM_AVAILABLE) * 100 / MEM_TOTAL))
+      if [ "$MEM_USAGE_PCT" -gt 90 ]; then
+        say "[ISSUE] Memory: ~$MEM_USAGE_PCT%"
+      else
+        say "[OK] Memory: ~$MEM_USAGE_PCT%"
+      fi
+    fi
+  fi
+fi
+
+# Network interface state
+if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_interfaces_state.txt" ]; then
+  echo >> "$REPORT"
+  DOWN_COUNT=$(grep -E "state DOWN" "$NODE_DIR/node_interfaces_state.txt" 2>/dev/null | grep -v " lo:" | wc -l | tr -d '[:space:]' || echo "0")
+  if [ "$DOWN_COUNT" -gt 0 ]; then
+    say "[ISSUE] Found $DOWN_COUNT interface(s) in DOWN state (excluding lo)"
+  else
+    say "[OK] No interfaces in unexpected DOWN state"
+  fi
+fi
+
+# CloudTrail API Diagnostics (if available)
+API_DIAG_DIR=""
+# Try to find the most recent API diag directory (same parent as bundle)
+if [ -d "$(dirname "$BUNDLE")" ]; then
+  API_DIAG_DIR=$(ls -dt "$(dirname "$BUNDLE")"/sgfp_api_diag_* 2>/dev/null | head -1 || echo "")
+fi
+
+if [ -n "$API_DIAG_DIR" ] && [ -d "$API_DIAG_DIR" ]; then
+  echo >> "$REPORT"
+  echo "## CloudTrail API Diagnostics" >> "$REPORT"
+  
+  # Check for real errors/throttles
+  if [ -s "$API_DIAG_DIR/eni_errors.tsv" ]; then
+    ERROR_COUNT=$(wc -l < "$API_DIAG_DIR/eni_errors.tsv" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    if [ "$ERROR_COUNT" -gt 0 ]; then
+      say "[ISSUE] Found $ERROR_COUNT real error/throttle event(s) in CloudTrail"
+      # Show recent errors
+      head -5 "$API_DIAG_DIR/eni_errors.tsv" | awk -F'\t' '{printf "  - %s: %s (%s)\n", $2, $5, $6}' >> "$REPORT" 2>/dev/null || true
+    else
+      say "[OK] No real errors/throttles found in CloudTrail"
+    fi
+  fi
+  
+  # Show throttle summary by action
+  if [ -s "$API_DIAG_DIR/throttle_by_action.txt" ]; then
+    THROTTLE_COUNT=$(wc -l < "$API_DIAG_DIR/throttle_by_action.txt" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    if [ "$THROTTLE_COUNT" -gt 0 ]; then
+      say "[INFO] Throttles by action:"
+      head -5 "$API_DIAG_DIR/throttle_by_action.txt" | sed 's/^/  - /' >> "$REPORT" 2>/dev/null || true
+    fi
+  fi
+  
+  # Show summary stats
+  if [ -s "$API_DIAG_DIR/flat_events.json" ]; then
+    TOTAL_EVENTS=$(jq -r 'length' "$API_DIAG_DIR/flat_events.json" 2>/dev/null || echo "0")
+    DRYRUN_COUNT=$(wc -l < "$API_DIAG_DIR/eni_dryruns.tsv" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    if [ "$TOTAL_EVENTS" != "0" ]; then
+      say "[INFO] Total ENI API events: $TOTAL_EVENTS (dry-runs: $DRYRUN_COUNT)"
+    fi
+  fi
+else
+  echo >> "$REPORT"
+  say "[INFO] CloudTrail API diagnostics not available (run with --skip-api to skip, or provide --api-dir)"
+fi
+
 echo >> "$REPORT"
 echo "## AWS ENI State" >> "$REPORT"
 

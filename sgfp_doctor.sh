@@ -45,8 +45,8 @@ elif [ "$SKIP_API" -eq 1 ]; then
   API_USED_DIR="$(ls -dt sgfp_api_diag_* 2>/dev/null | head -1 || true)"
 else
   echo "[DOCTOR] [2/6] Running API diagnostics (window: ${MINUTES}m$( [ -n "$REGION" ] && printf ", region: %s" "$REGION"))..."
-  if [ -n "$REGION" ]; then WINDOW_MINUTES="$MINUTES" AWS_REGION="$REGION" ./sgfp_api_diag.sh >/dev/null || true
-  else WINDOW_MINUTES="$MINUTES" ./sgfp_api_diag.sh >/dev/null || true; fi
+  if [ -n "$REGION" ]; then WINDOW_MINUTES="$MINUTES" AWS_REGION="$REGION" ./sgfp_api_diag.sh || true
+  else WINDOW_MINUTES="$MINUTES" ./sgfp_api_diag.sh || true; fi
   API_USED_DIR="$(ls -dt sgfp_api_diag_* 2>/dev/null | head -1 || true)"
   [ -n "$API_USED_DIR" ] && echo "[DOCTOR] API diag: $API_USED_DIR"
 fi

@@ -5,12 +5,15 @@ This toolkit collects comprehensive diagnostics for AWS EKS pods using Security 
 
 ## Features
 
-- **Comprehensive Pod Diagnostics**: Collects pod annotations, conditions, network namespace routes/rules, and reachability tests
+- **Comprehensive Pod Diagnostics**: Collects pod annotations, conditions, network namespace routes/rules, interface statistics, socket statistics, and reachability tests
 - **Security Group Validation**: Automatically validates actual SGs on pod ENI against expected SGs from pod, deployment, replicaset, or namespace annotations
 - **SG Details**: Shows Security Group IDs, names, and descriptions for easy identification
-- **Node Diagnostics**: Collects conntrack usage and aws-node logs
-- **AWS ENI State**: Captures trunk and branch ENI information
+- **Node Diagnostics**: Collects conntrack usage, interface error statistics, socket overruns, and AWS VPC CNI logs (automatically via temporary debug pod)
+- **CNI Log Analysis**: Automatically collects and analyzes CNI logs from `/var/log/aws-routed-eni/` including ipamd, plugin, network-policy-agent, and eBPF SDK logs
+- **Connectivity Analysis**: Advanced analysis for pod connectivity issues after large churns, including ENI attachment timing, subnet IP availability, and CNI log errors
+- **AWS ENI State**: Captures trunk and branch ENI information, subnet IP availability
 - **API Diagnostics**: Analyzes CloudTrail events for ENI-related throttles and errors (with dry-run detection)
+- **Node Debug Pod**: Helper script to create debug pods on nodes (supports pod name or node name)
 - **All-in-One Doctor Script**: Single command to collect, analyze, and report
 - **Consistent Output Format**: Uses `[PREFIX]` format for clear, parseable output
 
@@ -80,6 +83,19 @@ sgfp_bundle_<pod>_<timestamp>/
     node_name.txt
     pod_netns_routes_rules.txt
     pod_reachability.txt
+    pod_veth_interface.txt                 # veth interface name
+    pod_interface_stats.txt                # Interface statistics with errors
+    pod_sockstat.txt                       # Pod socket statistics
+    pod_sockstat6.txt                      # Pod IPv6 socket statistics
+    pod_snmp.txt                           # Pod socket overruns
+    pod_timing.txt                         # Pod creation/start timestamps
+    pod_events.txt                         # Pod events
+    pod_full.json                          # Full pod JSON
+    pod_container_statuses.json            # Container statuses
+    ipamd_introspection.json               # IPAMD introspection data
+    ipamd_pool.json                        # IPAMD pool state
+    ipamd_networkutils.json                # IPAMD network utils config
+    aws_node_errors.log                    # Filtered aws-node errors
     pod_branch_eni_id.txt
     pod_branch_eni_describe.json
     pod_branch_eni_sgs.txt              # Actual SGs on pod ENI
@@ -96,6 +112,38 @@ sgfp_bundle_<pod>_<timestamp>/
   node_<node>/
     node_conntrack_mtu.txt
     aws_node_full.log
+    node_interface_dev_stats.txt          # Interface error statistics
+    node_interface_ip_stats.txt            # ip -s link statistics
+    node_sockstat.txt                      # Socket statistics
+    node_sockstat6.txt                     # IPv6 socket statistics
+    node_snmp.txt                          # Socket overruns
+    node_netns_count.txt                   # Network namespace count
+    node_netns_list.txt                    # List of network namespaces
+    node_netns_details.json                # Network namespace details (interfaces, IPs, timing)
+    node_interfaces_state.txt              # All interface states
+    node_all_ips.txt                       # All IP addresses on node
+    node_duplicate_ips.txt                 # Duplicate IP addresses (if any)
+    node_dns_tests.txt                     # DNS resolution tests
+    node_file_descriptors.txt              # File descriptor usage
+    node_memory_info.txt                   # Memory information
+    node_k8s_networkpolicies.json          # Kubernetes NetworkPolicies
+    node_calico_networkpolicies.yaml       # Calico network policies (if Calico)
+    node_bpf_programs.txt                  # eBPF programs (if Cilium)
+    node_dmesg_network.txt                 # Network-related kernel messages
+    node_arp_table.txt                     # ARP table
+    node_iptables_filter.txt               # iptables filter rules
+    node_iptables_nat.txt                  # iptables NAT rules
+    node_routes_all.txt                    # Route table (all tables)
+    node_veth_interfaces.txt               # veth interfaces
+    node_syslog_network.txt                # Network-related syslog entries
+    cni_logs/                              # AWS VPC CNI logs
+      ipamd.log
+      plugin.log
+      network-policy-agent.log
+      ebpf-sdk.log
+      egress-v6-plugin.log
+      ipamd-latest-rotated.log
+      *.errors                              # Error summaries for each log
   aws_<node>/
     vpc_id.txt
     node_instance_id.txt
@@ -103,6 +151,7 @@ sgfp_bundle_<pod>_<timestamp>/
     trunk_eni.json
     all_instance_enis.json
     _all_branch_enis_in_vpc.json         # best-effort, may be empty
+    subnets.json                          # Subnet IP availability
   report.md                              # generated by sgfp_report.sh
 ```
 
@@ -148,7 +197,20 @@ Collects pod, node, and AWS diagnostics into a bundle.
 Collects pod-specific information including annotations, conditions, network namespace routes/rules.
 
 ### `sgfp_node_diag.sh` - Node Diagnostics
-Collects node-level diagnostics: conntrack usage and aws-node logs.
+Collects node-level diagnostics: conntrack usage, interface error statistics, socket overruns, and AWS VPC CNI logs.
+
+**Features:**
+- Automatically collects CNI logs from `/var/log/aws-routed-eni/` via temporary debug pod when not running on node
+- Collects interface error statistics from `/proc/net/dev` and `ip -s link`
+- Collects socket statistics including overruns from `/proc/net/sockstat` and `/proc/net/snmp`
+- Creates error summaries for each CNI log file
+- Analyzes network namespaces for leaks (orphaned namespaces with no interfaces)
+- Detects IP address conflicts
+- Tests DNS resolution
+- Checks for resource exhaustion (file descriptors, memory)
+- Collects network policy rules (Kubernetes and CNI-specific)
+- Checks network interface states
+- Collects kernel logs, ARP table, iptables rules, and route tables
 
 ### `sgfp_aws_diag.sh` - AWS ENI Diagnostics
 Collects AWS ENI information: instance ID, VPC ID, trunk ENI, branch ENIs.
@@ -180,6 +242,42 @@ Provides a quick summary of potential issues found in the bundle.
 - Validates Security Groups (actual vs expected)
 - Checks pod status, readiness gates, routing tables
 - Uses consistent `[OK]`, `[ISSUE]`, `[INFO]` format
+
+### `sgfp_analyze_connectivity.sh` - Connectivity Analysis
+Advanced analysis for diagnosing pod connectivity issues, especially after large pod churns.
+
+**Features:**
+- Analyzes ENI attachment state and timing
+- Checks IPAMD state and branch ENI limits
+- Validates subnet IP availability
+- Analyzes pod events for network-related issues
+- Analyzes CNI logs (both aws-node and node-level CNI logs)
+- Checks readiness gate timing
+- Detects stuck/orphaned network namespaces
+- Analyzes network namespace creation timing (delays after pod creation)
+- Detects IP address conflicts
+- Tests DNS resolution
+- Checks for resource exhaustion (file descriptors, memory pressure)
+- Validates network interface states
+
+### `sgfp_node_debug.sh` - Node Debug Pod
+Creates a debug pod on a node for interactive troubleshooting.
+
+```bash
+# Debug node where a pod is running
+./sgfp_node_debug.sh <pod-name> -n <namespace>
+
+# Debug node directly
+./sgfp_node_debug.sh <node-name>
+
+# With custom image
+./sgfp_node_debug.sh <pod-name> -n <namespace> <image>
+```
+
+**Features:**
+- Automatically detects if argument is a pod name or node name
+- Uses `kubectl debug node/` for proper node debugging
+- Defaults to `ubuntu` image
 
 ## Security Group Validation
 
@@ -222,8 +320,11 @@ make collect POD=<pod> NS=default      # Collect diagnostics
 make api WINDOW_MINUTES=60             # API diagnostics
 make report BUNDLE=<dir>               # Generate report
 make analyze BUNDLE=<dir>              # Post-analyze
+make analyze-connectivity BUNDLE=<dir> # Connectivity analysis
 make doctor POD=<pod> NS=default       # All-in-one
+make node-debug TARGET=<pod|node>      # Create debug pod on node
 make clean                             # Remove all diagnostic output directories
+make clean-debug-pods NS=<namespace>   # Clean up debug pods interactively
 ```
 
 ## Notes
@@ -234,6 +335,8 @@ make clean                             # Remove all diagnostic output directorie
 - **ICMP Reachability**: ICMP may be blocked; `pod_reachability.txt` is informational only.
 - **Security Groups**: SG names and descriptions require `ec2:DescribeSecurityGroups` permission. The toolkit automatically fetches this information when available.
 - **Dry-Run Operations**: API diagnostics distinguish between real errors/throttles and successful dry-run validations.
+- **CNI Log Collection**: When node diagnostics are run, the toolkit automatically creates a temporary privileged pod on the node to collect CNI logs from `/var/log/aws-routed-eni/`. The pod is automatically cleaned up after collection.
+- **Node Debug Pod**: The `sgfp_node_debug.sh` script can accept either a pod name (will find the node) or a node name directly.
 - **Output Directories**: All diagnostic output directories (`sgfp_bundle_*`, `sgfp_diag_*`, `sgfp_api_diag_*`) are automatically ignored by git (see `.gitignore`).
 
 ## Requirements

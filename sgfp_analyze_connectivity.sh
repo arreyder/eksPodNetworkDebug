@@ -222,6 +222,235 @@ else
 fi
 
 echo ""
+echo "=== Network Namespace Analysis ==="
+
+# Check for stuck/orphaned network namespaces
+if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_netns_details.json" ]; then
+  if jq -e 'length > 0' "$NODE_DIR/node_netns_details.json" >/dev/null 2>&1; then
+    NETNS_COUNT=$(jq -r 'length' "$NODE_DIR/node_netns_details.json" 2>/dev/null || echo "0")
+    echo "[INFO] Found $NETNS_COUNT network namespace(s) on node"
+    
+    # Check for namespaces with no interfaces (potential leaks)
+    # Note: Some namespaces might show 0 interfaces if they're in cleanup or we can't access them properly
+    # Only flag as issue if we have a significant number or if they're old
+    EMPTY_NS=$(jq -r '[.[] | select(.interface_count == 0)] | length' "$NODE_DIR/node_netns_details.json" 2>/dev/null || echo "0")
+    if [ "$EMPTY_NS" != "0" ]; then
+      # Check if any empty namespaces are old (more than 1 hour old) - these are more likely to be leaks
+      CURRENT_TIME=$(date +%s 2>/dev/null || echo "0")
+      if [ "$CURRENT_TIME" != "0" ]; then
+        OLD_EMPTY_NS=$(jq -r --arg now "$CURRENT_TIME" '[.[] | select(.interface_count == 0 and (($now | tonumber) - .mtime) > 3600)] | length' "$NODE_DIR/node_netns_details.json" 2>/dev/null || echo "0")
+        
+        if [ "$OLD_EMPTY_NS" != "0" ] && [ "$OLD_EMPTY_NS" != "null" ] && [ "$OLD_EMPTY_NS" != "" ]; then
+          echo "[ISSUE] Found $OLD_EMPTY_NS network namespace(s) with no interfaces and older than 1 hour (likely leaks)"
+          jq -r --arg now "$CURRENT_TIME" '.[] | select(.interface_count == 0 and (($now | tonumber) - .mtime) > 3600) | "  - \(.name) (age: \(($now | tonumber) - .mtime)s)"' "$NODE_DIR/node_netns_details.json" 2>/dev/null || true
+          issues=$((issues+1))
+        elif [ "$EMPTY_NS" -gt 10 ]; then
+          # If we have many empty namespaces, flag it as a potential issue
+          echo "[WARN] Found $EMPTY_NS network namespace(s) with no interfaces (may be in cleanup or detection issue)"
+          warnings=$((warnings+1))
+        else
+          echo "[INFO] Found $EMPTY_NS network namespace(s) with no interfaces (may be in cleanup)"
+        fi
+      else
+        # Can't determine age, just report count
+        if [ "$EMPTY_NS" -gt 10 ]; then
+          echo "[WARN] Found $EMPTY_NS network namespace(s) with no interfaces (may be in cleanup or detection issue)"
+          warnings=$((warnings+1))
+        else
+          echo "[INFO] Found $EMPTY_NS network namespace(s) with no interfaces (may be in cleanup)"
+        fi
+      fi
+    fi
+    
+    # Get pod UID and try to match against network namespace
+    # AWS VPC CNI uses container ID (sandbox ID) for namespace names, not pod UID directly
+    POD_UID=$(grep "^UID=" "$POD_DIR/pod_timing.txt" 2>/dev/null | cut -d= -f2- || echo "")
+    
+    # Try to get container ID from pod status (infra container)
+    POD_CONTAINER_ID=""
+    if [ -s "$POD_DIR/pod_full.json" ]; then
+      # Try multiple methods to get container ID:
+      # 1. Look for infra/pause container in containerStatuses
+      POD_CONTAINER_ID=$(jq -r '.status.containerStatuses[]? | select(.name | test("POD|infra|pause")) | .containerID // empty' "$POD_DIR/pod_full.json" 2>/dev/null | head -1 || echo "")
+      
+      # 2. If not found, try initContainers (some setups use init containers)
+      if [ -z "$POD_CONTAINER_ID" ] || [ "$POD_CONTAINER_ID" = "null" ] || [ "$POD_CONTAINER_ID" = "" ]; then
+        POD_CONTAINER_ID=$(jq -r '.status.initContainerStatuses[]? | select(.name | test("POD|infra|pause")) | .containerID // empty' "$POD_DIR/pod_full.json" 2>/dev/null | head -1 || echo "")
+      fi
+      
+      # 3. If still not found, get the first container's ID (fallback)
+      if [ -z "$POD_CONTAINER_ID" ] || [ "$POD_CONTAINER_ID" = "null" ] || [ "$POD_CONTAINER_ID" = "" ]; then
+        POD_CONTAINER_ID=$(jq -r '.status.containerStatuses[0]? | .containerID // empty' "$POD_DIR/pod_full.json" 2>/dev/null | head -1 || echo "")
+      fi
+      
+      # Remove container runtime prefix (e.g., "containerd://" or "docker://")
+      if [ -n "$POD_CONTAINER_ID" ] && [ "$POD_CONTAINER_ID" != "null" ] && [ "$POD_CONTAINER_ID" != "" ]; then
+        POD_CONTAINER_ID=$(echo "$POD_CONTAINER_ID" | sed 's|^[^:]*://||' || echo "$POD_CONTAINER_ID")
+      fi
+    fi
+    
+    POD_NS_FOUND=0
+    POD_NS_NAME=""
+    POD_NS_MTIME="0"
+    
+    # AWS VPC CNI network namespaces are typically named with "cni-" prefix followed by container ID hash
+    # The format is usually: cni-<hash> where hash is derived from container ID
+    # Try matching by container ID first (most reliable)
+    if [ -n "$POD_CONTAINER_ID" ] && [ "$POD_CONTAINER_ID" != "null" ] && [ "$POD_CONTAINER_ID" != "" ]; then
+      # Container IDs are usually 64-character hashes (sha256)
+      # AWS CNI may use a hash of the container ID, so try multiple approaches:
+      # 1. Try matching last 12 characters (common short ID format)
+      CONTAINER_ID_SHORT=$(echo "$POD_CONTAINER_ID" | tail -c 13 | head -c 12 || echo "$POD_CONTAINER_ID")
+      POD_NS_NAME=$(jq -r --arg cid "$CONTAINER_ID_SHORT" '.[] | select(.name | contains($cid)) | .name' "$NODE_DIR/node_netns_details.json" 2>/dev/null | head -1 || echo "")
+      
+      # 2. If not found, try matching any part of the container ID (CNI may hash it differently)
+      if [ -z "$POD_NS_NAME" ]; then
+        # Try matching first 12 characters
+        CONTAINER_ID_FIRST=$(echo "$POD_CONTAINER_ID" | head -c 12 || echo "")
+        POD_NS_NAME=$(jq -r --arg cid "$CONTAINER_ID_FIRST" '.[] | select(.name | contains($cid)) | .name' "$NODE_DIR/node_netns_details.json" 2>/dev/null | head -1 || echo "")
+      fi
+      
+      # 3. Try full container ID match (unlikely but possible)
+      if [ -z "$POD_NS_NAME" ]; then
+        POD_NS_NAME=$(jq -r --arg cid "$POD_CONTAINER_ID" '.[] | select(.name | contains($cid)) | .name' "$NODE_DIR/node_netns_details.json" 2>/dev/null | head -1 || echo "")
+      fi
+      
+      # 4. If still not found, the namespace name might be a hash of the container ID
+      # In that case, we can't match it directly, but we can note that we tried
+      if [ -z "$POD_NS_NAME" ] && [ -n "$POD_CONTAINER_ID" ]; then
+        # Debug: log that we have container ID but couldn't match
+        echo "[INFO] Container ID found: ${POD_CONTAINER_ID:0:12}... (but namespace not matched - may use hashed format)"
+      fi
+    fi
+    
+    # Fallback: try matching by pod UID (less reliable for AWS CNI)
+    if [ -z "$POD_NS_NAME" ] && [ -n "$POD_UID" ]; then
+      # Try exact UID match
+      POD_NS_NAME=$(jq -r --arg uid "$POD_UID" '.[] | select(.name == $uid) | .name' "$NODE_DIR/node_netns_details.json" 2>/dev/null | head -1 || echo "")
+      if [ -z "$POD_NS_NAME" ]; then
+        # Try partial match (UID might be part of namespace name)
+        POD_NS_NAME=$(jq -r --arg uid "$POD_UID" '.[] | select(.name | contains($uid)) | .name' "$NODE_DIR/node_netns_details.json" 2>/dev/null | head -1 || echo "")
+      fi
+    fi
+    
+    if [ -n "$POD_NS_NAME" ]; then
+      POD_NS_FOUND=1
+      POD_NS_MTIME=$(jq -r --arg name "$POD_NS_NAME" '.[] | select(.name == $name) | .mtime' "$NODE_DIR/node_netns_details.json" 2>/dev/null || echo "0")
+    fi
+    
+    if [ "$POD_NS_FOUND" = "0" ]; then
+      echo "[WARN] Pod network namespace not found (pod may not have network setup yet or namespace name doesn't match UID)"
+      warnings=$((warnings+1))
+    else
+      echo "[OK] Pod network namespace found: $POD_NS_NAME"
+      # Get namespace creation time and compare to pod creation
+      POD_CREATED=$(grep "^CREATED=" "$POD_DIR/pod_timing.txt" 2>/dev/null | cut -d= -f2- || echo "")
+      if [ -n "$POD_CREATED" ] && [ "$POD_CREATED" != "unknown" ] && [ "$POD_NS_MTIME" != "0" ]; then
+        # Convert pod creation time to epoch (handle both GNU and BSD date)
+        if date --version >/dev/null 2>&1; then
+          POD_CREATED_EPOCH=$(date -d "$POD_CREATED" +%s 2>/dev/null || echo "0")
+        else
+          POD_CREATED_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$POD_CREATED" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "$POD_CREATED" +%s 2>/dev/null || echo "0")
+        fi
+        if [ "$POD_CREATED_EPOCH" != "0" ] && [ "$POD_NS_MTIME" != "0" ]; then
+          NS_DELAY=$((POD_NS_MTIME - POD_CREATED_EPOCH))
+          if [ "$NS_DELAY" -lt 0 ]; then
+            echo "[WARN] Network namespace created before pod (timing anomaly)"
+            warnings=$((warnings+1))
+          elif [ "$NS_DELAY" -gt 60 ]; then
+            echo "[ISSUE] Network namespace creation delay: ${NS_DELAY}s after pod creation (>60s)"
+            issues=$((issues+1))
+          else
+            echo "[OK] Network namespace created ${NS_DELAY}s after pod creation"
+          fi
+        fi
+      fi
+    fi
+  fi
+else
+  echo "[INFO] Network namespace details not available"
+fi
+
+# IP address conflict detection
+if [ -n "$NODE_DIR" ] && [ -f "$NODE_DIR/node_duplicate_ips.txt" ]; then
+  # Check if file has non-whitespace content
+  if [ -s "$NODE_DIR/node_duplicate_ips.txt" ] && grep -q '[^[:space:]]' "$NODE_DIR/node_duplicate_ips.txt" 2>/dev/null; then
+    echo ""
+    echo "[ISSUE] IP address conflicts detected:"
+    grep '[^[:space:]]' "$NODE_DIR/node_duplicate_ips.txt" | sed 's/^/  - /'
+    issues=$((issues+1))
+  else
+    echo "[OK] No IP address conflicts detected"
+  fi
+fi
+
+# DNS resolution check
+if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_dns_tests.txt" ]; then
+  echo ""
+  echo "=== DNS Resolution ==="
+  # Check for actual failures (not the expected metadata service failure)
+  K8S_DNS_FAILED=$(grep -A 5 "kubernetes.default.svc.cluster.local" "$NODE_DIR/node_dns_tests.txt" 2>/dev/null | grep -qi "FAILED" && echo "1" || echo "0")
+  if [ "$K8S_DNS_FAILED" = "1" ]; then
+    echo "[ISSUE] Kubernetes DNS resolution failed"
+    grep -A 5 "kubernetes.default.svc.cluster.local" "$NODE_DIR/node_dns_tests.txt" | grep -E "(FAILED|error|timeout|NXDOMAIN)" | head -3 | sed 's/^/  - /'
+    issues=$((issues+1))
+  else
+    echo "[OK] Kubernetes DNS resolution working"
+  fi
+  # Note: metadata service DNS failure is expected and not an issue
+fi
+
+# Resource exhaustion checks
+if [ -n "$NODE_DIR" ]; then
+  echo ""
+  echo "=== Resource Exhaustion ==="
+  
+  # File descriptors
+  if [ -s "$NODE_DIR/node_file_descriptors.txt" ]; then
+    ALLOCATED=$(awk '{print $1}' "$NODE_DIR/node_file_descriptors.txt" 2>/dev/null || echo "0")
+    MAX=$(awk '{print $3}' "$NODE_DIR/node_file_descriptors.txt" 2>/dev/null || echo "0")
+    if [ "$MAX" != "0" ] && [ "$ALLOCATED" != "0" ]; then
+      USAGE_PCT=$((ALLOCATED * 100 / MAX))
+      if [ "$USAGE_PCT" -gt 80 ]; then
+        echo "[ISSUE] File descriptor usage high: $ALLOCATED / $MAX (~$USAGE_PCT%)"
+        issues=$((issues+1))
+      else
+        echo "[OK] File descriptor usage: $ALLOCATED / $MAX (~$USAGE_PCT%)"
+      fi
+    fi
+  fi
+  
+  # Memory pressure
+  if [ -s "$NODE_DIR/node_memory_info.txt" ]; then
+    MEM_AVAILABLE=$(grep "^MemAvailable:" "$NODE_DIR/node_memory_info.txt" 2>/dev/null | awk '{print $2}' || echo "0")
+    MEM_TOTAL=$(grep "^MemTotal:" "$NODE_DIR/node_memory_info.txt" 2>/dev/null | awk '{print $2}' || echo "0")
+    if [ "$MEM_TOTAL" != "0" ] && [ "$MEM_AVAILABLE" != "0" ]; then
+      MEM_USAGE_PCT=$(((MEM_TOTAL - MEM_AVAILABLE) * 100 / MEM_TOTAL))
+      if [ "$MEM_USAGE_PCT" -gt 90 ]; then
+        echo "[ISSUE] Memory usage high: ~$MEM_USAGE_PCT%"
+        issues=$((issues+1))
+      else
+        echo "[OK] Memory usage: ~$MEM_USAGE_PCT%"
+      fi
+    fi
+  fi
+fi
+
+# Network interface state check
+if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_interfaces_state.txt" ]; then
+  echo ""
+  echo "=== Network Interface State ==="
+  DOWN_COUNT=$(grep -E "state DOWN" "$NODE_DIR/node_interfaces_state.txt" 2>/dev/null | grep -v " lo:" | wc -l | tr -d '[:space:]' || echo "0")
+  if [ "$DOWN_COUNT" -gt 0 ]; then
+    echo "[ISSUE] Found $DOWN_COUNT interface(s) in DOWN state (excluding lo):"
+    grep -E "state DOWN" "$NODE_DIR/node_interfaces_state.txt" | grep -v " lo:" | head -10 | sed 's/^/  - /'
+    issues=$((issues+1))
+  else
+    echo "[OK] No interfaces in unexpected DOWN state"
+  fi
+fi
+
+echo ""
 echo "=== Readiness Gate Timing ==="
 
 # Check SG-for-Pods readiness gate timing
@@ -251,6 +480,50 @@ if [ -s "$POD_DIR/pod_conditions.json" ]; then
 fi
 
 echo ""
+echo "=== CloudTrail API Diagnostics ==="
+
+# Try to find API diagnostics directory (same parent as bundle)
+API_DIAG_DIR=""
+if [ -d "$(dirname "$BUNDLE")" ]; then
+  API_DIAG_DIR=$(ls -dt "$(dirname "$BUNDLE")"/sgfp_api_diag_* 2>/dev/null | head -1 || echo "")
+fi
+
+if [ -n "$API_DIAG_DIR" ] && [ -d "$API_DIAG_DIR" ]; then
+  # Check for real errors/throttles
+  if [ -s "$API_DIAG_DIR/eni_errors.tsv" ]; then
+    ERROR_COUNT=$(wc -l < "$API_DIAG_DIR/eni_errors.tsv" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    if [ "$ERROR_COUNT" -gt 0 ]; then
+      echo "[ISSUE] Found $ERROR_COUNT real error/throttle event(s) in CloudTrail"
+      echo "[INFO] Recent errors/throttles (last 5):"
+      head -5 "$API_DIAG_DIR/eni_errors.tsv" | awk -F'\t' '{printf "  - %s: %s (%s)\n", $2, $5, $6}' 2>/dev/null || true
+      issues=$((issues+1))
+    else
+      echo "[OK] No real errors/throttles found in CloudTrail"
+    fi
+  fi
+  
+  # Show throttle summary by action
+  if [ -s "$API_DIAG_DIR/throttle_by_action.txt" ]; then
+    THROTTLE_COUNT=$(wc -l < "$API_DIAG_DIR/throttle_by_action.txt" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    if [ "$THROTTLE_COUNT" -gt 0 ]; then
+      echo "[INFO] Throttles by action:"
+      head -5 "$API_DIAG_DIR/throttle_by_action.txt" | sed 's/^/  - /'
+    fi
+  fi
+  
+  # Show summary stats
+  if [ -s "$API_DIAG_DIR/flat_events.json" ]; then
+    TOTAL_EVENTS=$(jq -r 'length' "$API_DIAG_DIR/flat_events.json" 2>/dev/null || echo "0")
+    DRYRUN_COUNT=$(wc -l < "$API_DIAG_DIR/eni_dryruns.tsv" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    if [ "$TOTAL_EVENTS" != "0" ]; then
+      echo "[INFO] Total ENI API events analyzed: $TOTAL_EVENTS (dry-runs: $DRYRUN_COUNT)"
+    fi
+  fi
+else
+  echo "[INFO] CloudTrail API diagnostics not available (run with --skip-api to skip, or provide --api-dir)"
+fi
+
+echo ""
 echo "=== Summary ==="
 echo "[ANALYZE] Issues found: $issues"
 echo "[ANALYZE] Warnings: $warnings"
@@ -262,6 +535,9 @@ if [ "$issues" -gt 0 ] || [ "$warnings" -gt 0 ]; then
   [ "$warnings" -gt 0 ] && echo "  - Check branch ENI limits and subnet IP availability"
   echo "  - Review aws-node logs for detailed error messages"
   echo "  - Consider increasing warm pool size if IPs are low"
-  echo "  - Check for API throttling in CloudTrail events"
+  if [ -n "$API_DIAG_DIR" ] && [ -d "$API_DIAG_DIR" ] && [ -s "$API_DIAG_DIR/eni_errors.tsv" ]; then
+    ERROR_COUNT=$(wc -l < "$API_DIAG_DIR/eni_errors.tsv" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    [ "$ERROR_COUNT" -gt 0 ] && echo "  - Review CloudTrail API throttles/errors (see API diagnostics)"
+  fi
 fi
 
