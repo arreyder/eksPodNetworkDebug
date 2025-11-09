@@ -759,6 +759,134 @@ if [ -n "$NODE_DIR" ]; then
   fi
 fi
 
+# AMI / CNI / Kernel Drift Analysis
+if [ -n "$NODE_DIR" ]; then
+  echo ""
+  echo "=== AMI / CNI / Kernel Drift Analysis ==="
+  
+  VERSION_ISSUES=0
+  
+  # Check Kubernetes version
+  if [ -s "$NODE_DIR/node_k8s_version.txt" ]; then
+    K8S_VERSION=$(cat "$NODE_DIR/node_k8s_version.txt" 2>/dev/null | tr -d '[:space:]' || echo "")
+    if [ -n "$K8S_VERSION" ] && [ "$K8S_VERSION" != "" ]; then
+      echo "[INFO] Kubernetes version: $K8S_VERSION"
+      # Extract major.minor version
+      K8S_MAJOR_MINOR=$(echo "$K8S_VERSION" | sed -E 's/v?([0-9]+\.[0-9]+).*/\1/' || echo "")
+      if [ -n "$K8S_MAJOR_MINOR" ]; then
+        # Check if version is very old (e.g., < 1.20)
+        K8S_MAJOR=$(echo "$K8S_MAJOR_MINOR" | cut -d. -f1)
+        K8S_MINOR=$(echo "$K8S_MAJOR_MINOR" | cut -d. -f2)
+        if [ "$K8S_MAJOR" -lt 1 ] || ([ "$K8S_MAJOR" -eq 1 ] && [ "$K8S_MINOR" -lt 20 ]); then
+          echo "[WARN] Kubernetes version $K8S_VERSION is quite old (EKS typically uses 1.20+)"
+          warnings=$((warnings+1))
+          VERSION_ISSUES=1
+        fi
+      fi
+    fi
+  fi
+  
+  # Check OS image (AMI)
+  if [ -s "$NODE_DIR/node_os_image.txt" ]; then
+    OS_IMAGE=$(cat "$NODE_DIR/node_os_image.txt" 2>/dev/null | tr -d '[:space:]' || echo "")
+    if [ -n "$OS_IMAGE" ] && [ "$OS_IMAGE" != "" ]; then
+      echo "[INFO] OS image: $OS_IMAGE"
+      # Check if it's an EKS-optimized AMI
+      # EKS-optimized AMIs typically contain "eks" or are Amazon Linux 2023 (which is used for EKS)
+      if echo "$OS_IMAGE" | grep -qiE "eks|amazon.*linux.*eks|amazon.*linux.*2023"; then
+        echo "[OK] EKS-optimized AMI detected"
+      else
+        echo "[WARN] Non-EKS-optimized AMI detected: $OS_IMAGE (may cause compatibility issues)"
+        warnings=$((warnings+1))
+        VERSION_ISSUES=1
+      fi
+    fi
+  fi
+  
+  # Check kernel version
+  if [ -s "$NODE_DIR/node_kernel_version.txt" ]; then
+    KERNEL_VERSION=$(cat "$NODE_DIR/node_kernel_version.txt" 2>/dev/null | tr -d '[:space:]' || echo "")
+    if [ -n "$KERNEL_VERSION" ] && [ "$KERNEL_VERSION" != "" ]; then
+      echo "[INFO] Kernel version: $KERNEL_VERSION"
+      # Extract major.minor version
+      KERNEL_MAJOR=$(echo "$KERNEL_VERSION" | cut -d. -f1 || echo "0")
+      KERNEL_MINOR=$(echo "$KERNEL_VERSION" | cut -d. -f2 || echo "0")
+      # Check if kernel is very old (e.g., < 5.4)
+      if [ "$KERNEL_MAJOR" -lt 5 ] || ([ "$KERNEL_MAJOR" -eq 5 ] && [ "$KERNEL_MINOR" -lt 4 ]); then
+        echo "[WARN] Kernel version $KERNEL_VERSION is quite old (EKS typically uses 5.4+)"
+        warnings=$((warnings+1))
+        VERSION_ISSUES=1
+      fi
+    fi
+  fi
+  
+  # Check aws-node version
+  if [ -s "$NODE_DIR/node_aws_node_version.txt" ]; then
+    AWS_NODE_VERSION=$(cat "$NODE_DIR/node_aws_node_version.txt" 2>/dev/null | tr -d '[:space:]' || echo "")
+    if [ -n "$AWS_NODE_VERSION" ] && [ "$AWS_NODE_VERSION" != "" ]; then
+      echo "[INFO] aws-node version: $AWS_NODE_VERSION"
+      # Check if version is very old (e.g., < 1.10)
+      # Strip 'v' prefix if present
+      AWS_NODE_VERSION_CLEAN=$(echo "$AWS_NODE_VERSION" | sed 's/^v//' || echo "$AWS_NODE_VERSION")
+      AWS_NODE_MAJOR=$(echo "$AWS_NODE_VERSION_CLEAN" | cut -d. -f1 2>/dev/null || echo "0")
+      AWS_NODE_MINOR=$(echo "$AWS_NODE_VERSION_CLEAN" | cut -d. -f2 2>/dev/null || echo "0")
+      # Only do numeric comparison if we have valid numbers
+      if [ "$AWS_NODE_MAJOR" != "0" ] && [ -n "$AWS_NODE_MAJOR" ] && [ "$AWS_NODE_MAJOR" -ge 0 ] 2>/dev/null; then
+        if [ "$AWS_NODE_MAJOR" -lt 1 ] || ([ "$AWS_NODE_MAJOR" -eq 1 ] && [ "$AWS_NODE_MINOR" -lt 10 ] 2>/dev/null); then
+          echo "[WARN] aws-node version $AWS_NODE_VERSION is quite old (consider upgrading)"
+          warnings=$((warnings+1))
+          VERSION_ISSUES=1
+        fi
+      fi
+    fi
+  elif [ -s "$NODE_DIR/node_aws_node_image.txt" ]; then
+    AWS_NODE_IMAGE=$(cat "$NODE_DIR/node_aws_node_image.txt" 2>/dev/null | tr -d '[:space:]' || echo "")
+    if [ -n "$AWS_NODE_IMAGE" ] && [ "$AWS_NODE_IMAGE" != "" ]; then
+      echo "[INFO] aws-node image: $AWS_NODE_IMAGE"
+    fi
+  fi
+  
+  # Check kube-proxy version
+  if [ -s "$NODE_DIR/node_kube_proxy_version.txt" ]; then
+    KUBE_PROXY_VERSION=$(cat "$NODE_DIR/node_kube_proxy_version.txt" 2>/dev/null | tr -d '[:space:]' || echo "")
+    if [ -n "$KUBE_PROXY_VERSION" ] && [ "$KUBE_PROXY_VERSION" != "" ]; then
+      echo "[INFO] kube-proxy version: $KUBE_PROXY_VERSION"
+      # Check if kube-proxy version matches Kubernetes version
+      if [ -s "$NODE_DIR/node_k8s_version.txt" ]; then
+        K8S_VERSION=$(cat "$NODE_DIR/node_k8s_version.txt" 2>/dev/null | tr -d '[:space:]' || echo "")
+        K8S_MAJOR_MINOR=$(echo "$K8S_VERSION" | sed -E 's/v?([0-9]+\.[0-9]+).*/\1/' || echo "")
+        KUBE_PROXY_MAJOR_MINOR=$(echo "$KUBE_PROXY_VERSION" | sed -E 's/v?([0-9]+\.[0-9]+).*/\1/' || echo "")
+        if [ -n "$K8S_MAJOR_MINOR" ] && [ -n "$KUBE_PROXY_MAJOR_MINOR" ] && [ "$K8S_MAJOR_MINOR" != "$KUBE_PROXY_MAJOR_MINOR" ]; then
+          echo "[ISSUE] kube-proxy version ($KUBE_PROXY_VERSION) does not match Kubernetes version ($K8S_VERSION) - version mismatch may cause issues"
+          issues=$((issues+1))
+          VERSION_ISSUES=1
+        else
+          echo "[OK] kube-proxy version matches Kubernetes version"
+        fi
+      fi
+    fi
+  elif [ -s "$NODE_DIR/node_kube_proxy_image.txt" ]; then
+    KUBE_PROXY_IMAGE=$(cat "$NODE_DIR/node_kube_proxy_image.txt" 2>/dev/null | tr -d '[:space:]' || echo "")
+    if [ -n "$KUBE_PROXY_IMAGE" ] && [ "$KUBE_PROXY_IMAGE" != "" ]; then
+      echo "[INFO] kube-proxy image: $KUBE_PROXY_IMAGE"
+    fi
+  fi
+  
+  # Check container runtime version
+  if [ -s "$NODE_DIR/node_container_runtime_version.txt" ]; then
+    CONTAINERD_VERSION=$(cat "$NODE_DIR/node_container_runtime_version.txt" 2>/dev/null | tr -d '[:space:]' || echo "")
+    if [ -n "$CONTAINERD_VERSION" ] && [ "$CONTAINERD_VERSION" != "" ]; then
+      echo "[INFO] Container runtime: $CONTAINERD_VERSION"
+    fi
+  fi
+  
+  if [ "$VERSION_ISSUES" -eq 0 ]; then
+    echo "[OK] No version drift issues detected"
+  else
+    echo "[INFO] Recommendation: Ensure all components use compatible versions, use EKS-optimized AMIs, and keep components up to date"
+  fi
+fi
+
 # Resource exhaustion checks
 if [ -n "$NODE_DIR" ]; then
   echo ""

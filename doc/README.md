@@ -24,6 +24,7 @@ This directory contains detailed documentation for each diagnostic check perform
 18. **[Health Probes](18-health-probes.md)** - Analyzes health probe configuration and failures
 19. **[Network Policies](19-network-policies.md)** - Analyzes NetworkPolicy rules and potential traffic blocks
 20. **[DNS / CoreDNS / NodeLocal DNSCache](20-dns-coredns-nodelocal.md)** - Analyzes DNS infrastructure, CoreDNS pods, and NodeLocal DNSCache
+21. **[AMI / CNI / Kernel Drift](21-ami-cni-kernel-drift.md)** - Detects version mismatches and drift in Kubernetes components, AMI, and kernel
 
 ## Document Structure
 

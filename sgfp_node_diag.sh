@@ -649,6 +649,90 @@ if command -v kubectl >/dev/null 2>&1; then
   fi
 fi
 
+# Collect version information (AMI / CNI / kernel drift detection)
+log "Collecting version information..."
+if command -v kubectl >/dev/null 2>&1; then
+  # Node information (Kubernetes version, OS image, kernel)
+  kubectl get node "$NODE" -o json > "$OUT/node_info.json" 2>/dev/null || echo '{}' > "$OUT/node_info.json"
+  
+  # Extract Kubernetes version
+  K8S_VERSION=$(jq -r '.status.nodeInfo.kubeletVersion // .status.nodeInfo.kubeProxyVersion // ""' "$OUT/node_info.json" 2>/dev/null || echo "")
+  if [ -n "$K8S_VERSION" ] && [ "$K8S_VERSION" != "null" ] && [ "$K8S_VERSION" != "" ]; then
+    echo "$K8S_VERSION" > "$OUT/node_k8s_version.txt"
+    log "Kubernetes version: $K8S_VERSION"
+  else
+    echo "" > "$OUT/node_k8s_version.txt"
+  fi
+  
+  # Extract OS image (AMI)
+  OS_IMAGE=$(jq -r '.status.nodeInfo.osImage // ""' "$OUT/node_info.json" 2>/dev/null || echo "")
+  if [ -n "$OS_IMAGE" ] && [ "$OS_IMAGE" != "null" ] && [ "$OS_IMAGE" != "" ]; then
+    echo "$OS_IMAGE" > "$OUT/node_os_image.txt"
+    log "OS image: $OS_IMAGE"
+  else
+    echo "" > "$OUT/node_os_image.txt"
+  fi
+  
+  # Extract kernel version
+  KERNEL_VERSION=$(jq -r '.status.nodeInfo.kernelVersion // ""' "$OUT/node_info.json" 2>/dev/null || echo "")
+  if [ -n "$KERNEL_VERSION" ] && [ "$KERNEL_VERSION" != "null" ] && [ "$KERNEL_VERSION" != "" ]; then
+    echo "$KERNEL_VERSION" > "$OUT/node_kernel_version.txt"
+    log "Kernel version: $KERNEL_VERSION"
+  else
+    echo "" > "$OUT/node_kernel_version.txt"
+  fi
+  
+  # Extract container runtime version
+  CONTAINERD_VERSION=$(jq -r '.status.nodeInfo.containerRuntimeVersion // ""' "$OUT/node_info.json" 2>/dev/null || echo "")
+  if [ -n "$CONTAINERD_VERSION" ] && [ "$CONTAINERD_VERSION" != "null" ] && [ "$CONTAINERD_VERSION" != "" ]; then
+    echo "$CONTAINERD_VERSION" > "$OUT/node_container_runtime_version.txt"
+    log "Container runtime: $CONTAINERD_VERSION"
+  else
+    echo "" > "$OUT/node_container_runtime_version.txt"
+  fi
+  
+  # aws-node DaemonSet version (from image tag)
+  kubectl get daemonset -n kube-system aws-node -o json > "$OUT/node_aws_node_daemonset.json" 2>/dev/null || echo '{}' > "$OUT/node_aws_node_daemonset.json"
+  AWS_NODE_IMAGE=$(jq -r '.spec.template.spec.containers[0].image // ""' "$OUT/node_aws_node_daemonset.json" 2>/dev/null || echo "")
+  if [ -n "$AWS_NODE_IMAGE" ] && [ "$AWS_NODE_IMAGE" != "null" ] && [ "$AWS_NODE_IMAGE" != "" ]; then
+    echo "$AWS_NODE_IMAGE" > "$OUT/node_aws_node_image.txt"
+    # Extract version/tag from image
+    AWS_NODE_VERSION=$(echo "$AWS_NODE_IMAGE" | sed -E 's/.*:([^@]+).*/\1/' | sed 's/@.*//' || echo "")
+    if [ -n "$AWS_NODE_VERSION" ] && [ "$AWS_NODE_VERSION" != "latest" ]; then
+      echo "$AWS_NODE_VERSION" > "$OUT/node_aws_node_version.txt"
+      log "aws-node version: $AWS_NODE_VERSION"
+    else
+      echo "" > "$OUT/node_aws_node_version.txt"
+    fi
+  else
+    echo "" > "$OUT/node_aws_node_image.txt"
+    echo "" > "$OUT/node_aws_node_version.txt"
+  fi
+  
+  # kube-proxy DaemonSet version (from image tag)
+  kubectl get daemonset -n kube-system kube-proxy -o json > "$OUT/node_kube_proxy_daemonset.json" 2>/dev/null || echo '{}' > "$OUT/node_kube_proxy_daemonset.json"
+  KUBE_PROXY_IMAGE=$(jq -r '.spec.template.spec.containers[0].image // ""' "$OUT/node_kube_proxy_daemonset.json" 2>/dev/null || echo "")
+  if [ -n "$KUBE_PROXY_IMAGE" ] && [ "$KUBE_PROXY_IMAGE" != "null" ] && [ "$KUBE_PROXY_IMAGE" != "" ]; then
+    echo "$KUBE_PROXY_IMAGE" > "$OUT/node_kube_proxy_image.txt"
+    # Extract version/tag from image
+    KUBE_PROXY_VERSION=$(echo "$KUBE_PROXY_IMAGE" | sed -E 's/.*:([^@]+).*/\1/' | sed 's/@.*//' || echo "")
+    if [ -n "$KUBE_PROXY_VERSION" ] && [ "$KUBE_PROXY_VERSION" != "latest" ]; then
+      echo "$KUBE_PROXY_VERSION" > "$OUT/node_kube_proxy_version.txt"
+      log "kube-proxy version: $KUBE_PROXY_VERSION"
+    else
+      echo "" > "$OUT/node_kube_proxy_version.txt"
+    fi
+  else
+    echo "" > "$OUT/node_kube_proxy_image.txt"
+    echo "" > "$OUT/node_kube_proxy_version.txt"
+  fi
+  
+  # Node labels (may contain AMI/version info)
+  kubectl get node "$NODE" -o jsonpath='{.metadata.labels}' > "$OUT/node_labels.json" 2>/dev/null || echo '{}' > "$OUT/node_labels.json"
+  
+  log "Collected version information"
+fi
+
 # Resource exhaustion checks
 log "Checking for resource exhaustion..."
 # File descriptors

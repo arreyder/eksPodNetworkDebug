@@ -19,6 +19,7 @@ This toolkit collects comprehensive diagnostics for AWS EKS pods using Security 
 - **Health Probe Analysis**: Analyzes health probe configurations (liveness, readiness, startup), verifies probe ports are listening, checks for probe failures, and validates network access from kubelet
 - **NetworkPolicy Analysis**: Analyzes NetworkPolicies to detect if they block DNS, health probes, metrics, or service traffic, validates podSelector matches, and checks for missing egress rules
 - **DNS / CoreDNS / NodeLocal DNSCache Analysis**: Analyzes DNS infrastructure, CoreDNS pod status and scaling, NodeLocal DNSCache presence and configuration, DNS service endpoints, and DNS resolution tests
+- **AMI / CNI / Kernel Drift Analysis**: Detects version mismatches between Kubernetes, kube-proxy, aws-node, OS image (AMI), and kernel versions, flags non-EKS-optimized AMIs, and identifies outdated components
 - **Connectivity Analysis**: Advanced analysis for pod connectivity issues after large churns, including ENI attachment timing, subnet IP availability, CNI log errors, and SYN_SENT connection detection (identifies pods trying to connect but waiting for ACK)
 - **AWS ENI State**: Captures trunk and branch ENI information, subnet IP availability, and instance type details
 - **API Diagnostics**: Analyzes CloudTrail events for ENI-related throttles and errors (with dry-run detection)
@@ -170,6 +171,18 @@ sgfp_bundle_<pod>_<timestamp>/
     node_nodelocal_dns_service.json        # NodeLocal DNSCache service (if enabled)
     node_coredns_config.json               # CoreDNS configuration
     node_pending_pods.json                 # Pods in Pending state (for IP exhaustion analysis)
+    node_info.json                         # Node information (Kubernetes version, OS image, kernel)
+    node_k8s_version.txt                   # Kubernetes version
+    node_os_image.txt                      # OS image (AMI)
+    node_kernel_version.txt                 # Kernel version
+    node_container_runtime_version.txt     # Container runtime version
+    node_aws_node_daemonset.json           # aws-node DaemonSet configuration
+    node_aws_node_image.txt                # aws-node image
+    node_aws_node_version.txt              # aws-node version
+    node_kube_proxy_daemonset.json         # kube-proxy DaemonSet configuration
+    node_kube_proxy_image.txt              # kube-proxy image
+    node_kube_proxy_version.txt            # kube-proxy version
+    node_labels.json                       # Node labels
     node_file_descriptors.txt              # File descriptor usage
     node_memory_info.txt                   # Memory information
     node_k8s_networkpolicies.json          # Kubernetes NetworkPolicies
@@ -359,6 +372,7 @@ Advanced analysis for diagnosing pod connectivity issues, especially after large
 - **Health Probe Analysis**: Analyzes probe configurations, verifies probe ports are listening, checks for probe failures, and validates network access
 - **NetworkPolicy Analysis**: Analyzes NetworkPolicies to detect if they block DNS, health probes, metrics, or service traffic
 - **DNS / CoreDNS / NodeLocal DNSCache Analysis**: Analyzes CoreDNS pod status and scaling, NodeLocal DNSCache presence, DNS service endpoints, and DNS resolution
+- **AMI / CNI / Kernel Drift Analysis**: Detects version mismatches between Kubernetes, kube-proxy, aws-node, OS image (AMI), and kernel versions, flags non-EKS-optimized AMIs, and identifies outdated components
 - **ENI/Instance Limits Analysis**: Checks instance type ENI/IP limits, current usage, trunk ENI branch ENI count, and estimates max pods
 - Checks IPAMD state and branch ENI limits
 - Validates subnet IP availability
