@@ -796,6 +796,95 @@ if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_interfaces_state.txt" ]; then
   fi
 fi
 
+# iptables rules summary
+if [ -n "$NODE_DIR" ]; then
+  NODE_IPTABLES_FILTER="${NODE_DIR}/node_iptables_filter.txt"
+  NODE_IPTABLES_NAT="${NODE_DIR}/node_iptables_nat.txt"
+  
+  if [ -s "$NODE_IPTABLES_FILTER" ] || [ -s "$NODE_IPTABLES_NAT" ]; then
+    echo >> "$REPORT"
+    say "[INFO] iptables rules collected:"
+    
+    if [ -s "$NODE_IPTABLES_FILTER" ]; then
+      # Count chains and rules (lines starting with Chain or rule lines with packet counts)
+      # iptables -L -n -v format: "Chain CHAIN_NAME (policy ...)" or "    pkts bytes target     prot opt in     out     source               destination"
+      FILTER_CHAINS=$(grep -c "^Chain" "$NODE_IPTABLES_FILTER" 2>/dev/null | tr -d '[:space:]' || echo "0")
+      # Count rule lines (lines that start with spaces and have numbers in first column, but not empty lines or headers)
+      FILTER_RULES=$(grep -E "^[[:space:]]+[0-9]+" "$NODE_IPTABLES_FILTER" 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+      if [ -n "$FILTER_CHAINS" ] && [ -n "$FILTER_RULES" ] && ([ "$FILTER_CHAINS" != "0" ] || [ "$FILTER_RULES" != "0" ]); then
+        say "  - Filter table: $FILTER_CHAINS chain(s), $FILTER_RULES rule(s) - \`node_*/node_iptables_filter.txt\`"
+      else
+        say "  - Filter table: collected (see \`node_*/node_iptables_filter.txt\`)"
+      fi
+    else
+      say "  - Filter table: not available"
+    fi
+    
+    if [ -s "$NODE_IPTABLES_NAT" ]; then
+      NAT_CHAINS=$(grep -c "^Chain" "$NODE_IPTABLES_NAT" 2>/dev/null | tr -d '[:space:]' || echo "0")
+      NAT_RULES=$(grep -E "^[[:space:]]+[0-9]+" "$NODE_IPTABLES_NAT" 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+      if [ -n "$NAT_CHAINS" ] && [ -n "$NAT_RULES" ] && ([ "$NAT_CHAINS" != "0" ] || [ "$NAT_RULES" != "0" ]); then
+        say "  - NAT table: $NAT_CHAINS chain(s), $NAT_RULES rule(s) - \`node_*/node_iptables_nat.txt\`"
+      else
+        say "  - NAT table: collected (see \`node_*/node_iptables_nat.txt\`)"
+      fi
+    else
+      say "  - NAT table: not available"
+    fi
+    
+    # Check for pod-specific iptables rules
+    POD_IP=$(grep "^POD_IP=" "$POD_IP_FILE" 2>/dev/null | cut -d= -f2- || echo "")
+    VETH_NAME=$(cat "$POD_VETH" 2>/dev/null | tr -d '[:space:]' || echo "")
+    
+    if [ -n "$POD_IP" ] && [ "$POD_IP" != "unknown" ]; then
+      POD_IPTABLES_FOUND=0
+      POD_IPTABLES_TMP=$(mktemp)
+      
+      # Search for pod IP in iptables rules
+      if [ -s "$NODE_IPTABLES_FILTER" ]; then
+        grep -i "$POD_IP" "$NODE_IPTABLES_FILTER" 2>/dev/null | head -5 > "$POD_IPTABLES_TMP" || true
+        if [ -s "$POD_IPTABLES_TMP" ]; then
+          POD_IPTABLES_FOUND=1
+        fi
+      fi
+      if [ -s "$NODE_IPTABLES_NAT" ]; then
+        grep -i "$POD_IP" "$NODE_IPTABLES_NAT" 2>/dev/null | head -5 >> "$POD_IPTABLES_TMP" || true
+        if [ -s "$POD_IPTABLES_TMP" ]; then
+          POD_IPTABLES_FOUND=1
+        fi
+      fi
+      
+      # Also check for veth interface name if available
+      if [ -n "$VETH_NAME" ] && [ "$VETH_NAME" != "unknown" ]; then
+        if [ -s "$NODE_IPTABLES_FILTER" ]; then
+          grep -i "$VETH_NAME" "$NODE_IPTABLES_FILTER" 2>/dev/null | head -3 >> "$POD_IPTABLES_TMP" || true
+        fi
+        if [ -s "$NODE_IPTABLES_NAT" ]; then
+          grep -i "$VETH_NAME" "$NODE_IPTABLES_NAT" 2>/dev/null | head -3 >> "$POD_IPTABLES_TMP" || true
+        fi
+      fi
+      
+      # Count total matches
+      POD_RULE_COUNT=$(grep -v '^[[:space:]]*$' "$POD_IPTABLES_TMP" 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+      
+      if [ "$POD_RULE_COUNT" -gt 0 ]; then
+        say "[OK] Found $POD_RULE_COUNT iptables rule(s) matching pod IP $POD_IP"
+        # Show a few example rules
+        if [ "$POD_RULE_COUNT" -le 5 ]; then
+          grep -v '^[[:space:]]*$' "$POD_IPTABLES_TMP" 2>/dev/null | head -3 | sed 's/^/    /' >> "$REPORT" 2>/dev/null || true
+        else
+          grep -v '^[[:space:]]*$' "$POD_IPTABLES_TMP" 2>/dev/null | head -2 | sed 's/^/    /' >> "$REPORT" 2>/dev/null || true
+          say "    ... and $((POD_RULE_COUNT - 2)) more rule(s) (see iptables files for full details)"
+        fi
+      else
+        say "[INFO] No iptables rules found matching pod IP $POD_IP (may be normal if no network policies apply)"
+      fi
+      
+      rm -f "$POD_IPTABLES_TMP" 2>/dev/null || true
+    fi
+  fi
+fi
+
 # CloudTrail API Diagnostics (if available)
 API_DIAG_DIR=""
 # Try to find the most recent API diag directory (same parent as bundle)

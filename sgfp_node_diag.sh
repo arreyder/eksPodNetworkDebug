@@ -32,9 +32,9 @@ fi
 log "Checking conntrack usage..."
 CONNTRACK_COLLECTED=0
 CONNTRACK_DATA=""
-if [ -r /proc/sys/net/netfilter/nf_conntrack_count ] && [ -r /proc/sys/net/netfilter/nf_conntrack_max ]; then
-  COUNT=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo 0)
-  MAX=$(cat /proc/sys/net/netfilter/nf_conntrack_max   2>/dev/null || echo 0)
+  if [ -r /proc/sys/net/netfilter/nf_conntrack_count ] && [ -r /proc/sys/net/netfilter/nf_conntrack_max ]; then
+    COUNT=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo 0)
+    MAX=$(cat /proc/sys/net/netfilter/nf_conntrack_max   2>/dev/null || echo 0)
   if [ "$COUNT" != "0" ] || [ "$MAX" != "0" ]; then
     CONNTRACK_DATA="$COUNT / $MAX"
     log "Conntrack: $CONNTRACK_DATA"
@@ -180,10 +180,11 @@ if [ "$CNI_LOGS_FOUND" -eq 0 ]; then
   log "Creating temporary pod on node to collect CNI logs..."
   
   # Create a temporary pod on the node with host access
+  # Use ubuntu image instead of busybox for better tool availability (iptables, etc.)
   if kubectl run "$TEMP_POD_NAME" \
-    --image=busybox:latest \
+    --image=ubuntu:latest \
     --restart=Never \
-    --overrides="{\"spec\":{\"nodeName\":\"$NODE\",\"hostNetwork\":true,\"hostPID\":true,\"hostIPC\":true,\"containers\":[{\"name\":\"collector\",\"image\":\"busybox:latest\",\"command\":[\"sleep\",\"300\"],\"securityContext\":{\"privileged\":true},\"volumeMounts\":[{\"name\":\"host-root\",\"mountPath\":\"/host\"}]}],\"volumes\":[{\"name\":\"host-root\",\"hostPath\":{\"path\":\"/\"}}]}}" \
+    --overrides="{\"spec\":{\"nodeName\":\"$NODE\",\"hostNetwork\":true,\"hostPID\":true,\"hostIPC\":true,\"containers\":[{\"name\":\"collector\",\"image\":\"ubuntu:latest\",\"command\":[\"sleep\",\"300\"],\"securityContext\":{\"privileged\":true},\"volumeMounts\":[{\"name\":\"host-root\",\"mountPath\":\"/host\"}]}],\"volumes\":[{\"name\":\"host-root\",\"hostPath\":{\"path\":\"/\"}}]}}" \
     >/dev/null 2>&1; then
     
     # Wait for pod to be ready
@@ -305,10 +306,46 @@ if [ -r /proc/net/arp ] || [ -r /host/proc/net/arp ]; then
 fi
 
 # iptables rules (check for network policy or routing issues)
+IPTABLES_COLLECTED=0
 if command -v iptables >/dev/null 2>&1; then
-  iptables -L -n -v > "$OUT/node_iptables_filter.txt" 2>/dev/null || echo "" > "$OUT/node_iptables_filter.txt"
-  iptables -t nat -L -n -v > "$OUT/node_iptables_nat.txt" 2>/dev/null || echo "" > "$OUT/node_iptables_nat.txt"
-  log "Collected iptables rules"
+  if iptables -L -n -v > "$OUT/node_iptables_filter.txt" 2>/dev/null && iptables -t nat -L -n -v > "$OUT/node_iptables_nat.txt" 2>/dev/null; then
+    log "Collected iptables rules"
+    IPTABLES_COLLECTED=1
+  else
+    echo "" > "$OUT/node_iptables_filter.txt"
+    echo "" > "$OUT/node_iptables_nat.txt"
+  fi
+fi
+
+# Try to collect iptables via temporary pod if direct access didn't work
+if [ "$IPTABLES_COLLECTED" -eq 0 ] && [ "${TEMP_POD_AVAILABLE:-0}" = "1" ] && [ -n "${TEMP_POD_NAME:-}" ]; then
+  log "Collecting iptables rules via temporary pod..."
+  # Try iptables command first, then fall back to reading from /host/proc if available
+  # busybox may not have iptables, but we can try to read from /host/sys or use nsenter
+  if kubectl exec "$TEMP_POD_NAME" -- sh -c "command -v iptables >/dev/null 2>&1 && iptables -L -n -v 2>/dev/null || true" > "$OUT/node_iptables_filter.txt" 2>/dev/null; then
+    if kubectl exec "$TEMP_POD_NAME" -- sh -c "command -v iptables >/dev/null 2>&1 && iptables -t nat -L -n -v 2>/dev/null || true" > "$OUT/node_iptables_nat.txt" 2>/dev/null; then
+      if [ -s "$OUT/node_iptables_filter.txt" ] || [ -s "$OUT/node_iptables_nat.txt" ]; then
+        log "Collected iptables rules via temporary pod"
+        IPTABLES_COLLECTED=1
+      fi
+    fi
+  fi
+  # If busybox doesn't have iptables, try using nsenter to run iptables from host namespace
+  if [ "$IPTABLES_COLLECTED" -eq 0 ]; then
+    if kubectl exec "$TEMP_POD_NAME" -- sh -c "nsenter --target 1 --mount --uts --ipc --net --pid iptables -L -n -v 2>/dev/null || true" > "$OUT/node_iptables_filter.txt" 2>/dev/null; then
+      if kubectl exec "$TEMP_POD_NAME" -- sh -c "nsenter --target 1 --mount --uts --ipc --net --pid iptables -t nat -L -n -v 2>/dev/null || true" > "$OUT/node_iptables_nat.txt" 2>/dev/null; then
+        if [ -s "$OUT/node_iptables_filter.txt" ] || [ -s "$OUT/node_iptables_nat.txt" ]; then
+          log "Collected iptables rules via temporary pod (using nsenter)"
+          IPTABLES_COLLECTED=1
+        fi
+      fi
+    fi
+  fi
+fi
+
+if [ "$IPTABLES_COLLECTED" -eq 0 ]; then
+  echo "" > "$OUT/node_iptables_filter.txt"
+  echo "" > "$OUT/node_iptables_nat.txt"
 fi
 
 # Route table (more detailed)
