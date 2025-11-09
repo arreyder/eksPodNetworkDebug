@@ -1637,6 +1637,132 @@ if [ -n "$POD_DIR" ] && [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_k8s_networkpo
 fi
 
 echo ""
+echo "=== Custom Networking / ENIConfig Analysis ==="
+
+# Check for ENIConfig resources
+if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_eniconfigs.json" ]; then
+  ENICONFIG_FILE="$NODE_DIR/node_eniconfigs.json"
+  ENICONFIG_COUNT=$(jq -r '.items | length' "$ENICONFIG_FILE" 2>/dev/null | tr -d '[:space:]' || echo "0")
+  
+  if [ "$ENICONFIG_COUNT" = "0" ] || [ -z "$ENICONFIG_COUNT" ]; then
+    echo "[OK] No ENIConfig resources found (custom networking not enabled - using default VPC CNI)"
+  else
+    echo "[INFO] Found $ENICONFIG_COUNT ENIConfig resource(s) (custom networking enabled)"
+    
+    ENICONFIG_ISSUES=0
+    
+    # Get subnet information from AWS data for validation
+    if [ -n "$AWS_DIR" ] && [ -s "$AWS_DIR/subnets.json" ]; then
+      # Build subnet lookup: subnet-id -> [cidr, az]
+      # subnets.json format: [subnet-id, available-ips, cidr, az]
+      
+      # Validate each ENIConfig
+      ENICONFIG_INDEX=0
+      while [ "$ENICONFIG_INDEX" -lt "$ENICONFIG_COUNT" ]; do
+        ENICONFIG_NAME=$(jq -r ".items[$ENICONFIG_INDEX].metadata.name // \"\"" "$ENICONFIG_FILE" 2>/dev/null || echo "")
+        ENICONFIG_SUBNET=$(jq -r ".items[$ENICONFIG_INDEX].spec.subnet // \"\"" "$ENICONFIG_FILE" 2>/dev/null || echo "")
+        ENICONFIG_SGS=$(jq -r ".items[$ENICONFIG_INDEX].spec.securityGroups // []" "$ENICONFIG_FILE" 2>/dev/null || echo "[]")
+        ENICONFIG_TAGS=$(jq -r ".items[$ENICONFIG_INDEX].spec.tags // {}" "$ENICONFIG_FILE" 2>/dev/null || echo "{}")
+        
+        if [ -n "$ENICONFIG_NAME" ] && [ "$ENICONFIG_NAME" != "null" ]; then
+          echo "[INFO] ENIConfig '$ENICONFIG_NAME':"
+          
+          # Validate subnet exists and get its AZ
+          if [ -n "$ENICONFIG_SUBNET" ] && [ "$ENICONFIG_SUBNET" != "null" ] && [ "$ENICONFIG_SUBNET" != "" ]; then
+            # Find subnet in AWS data
+            SUBNET_INFO=$(jq -r ".[] | select(.[0] == \"$ENICONFIG_SUBNET\") | [.[2], .[3]] | @tsv" "$AWS_DIR/subnets.json" 2>/dev/null || echo "")
+            
+            if [ -n "$SUBNET_INFO" ]; then
+              SUBNET_CIDR=$(echo "$SUBNET_INFO" | cut -f1)
+              SUBNET_AZ=$(echo "$SUBNET_INFO" | cut -f2)
+              echo "  - Subnet: $ENICONFIG_SUBNET (CIDR: $SUBNET_CIDR, AZ: $SUBNET_AZ)"
+              
+              # Check if ENIConfig name matches AZ (common pattern: ENIConfig name = AZ)
+              if [ "$ENICONFIG_NAME" != "$SUBNET_AZ" ] && [ "$ENICONFIG_NAME" != "default" ]; then
+                echo "  - [WARN] ENIConfig name '$ENICONFIG_NAME' does not match subnet AZ '$SUBNET_AZ' (may cause confusion)"
+                warnings=$((warnings+1))
+                ENICONFIG_ISSUES=1
+              fi
+            else
+              echo "  - [ISSUE] Subnet '$ENICONFIG_SUBNET' not found in VPC (may be in different VPC or deleted)"
+              issues=$((issues+1))
+              ENICONFIG_ISSUES=1
+            fi
+          else
+            echo "  - [ISSUE] ENIConfig missing subnet specification"
+            issues=$((issues+1))
+            ENICONFIG_ISSUES=1
+          fi
+          
+          # Show security groups if specified
+          SG_COUNT=$(echo "$ENICONFIG_SGS" | jq -r 'length' 2>/dev/null || echo "0")
+          if [ "$SG_COUNT" -gt 0 ]; then
+            echo "  - Security Groups: $SG_COUNT SG(s) specified"
+          fi
+          
+          # Show tags if specified
+          TAG_COUNT=$(echo "$ENICONFIG_TAGS" | jq -r 'length' 2>/dev/null || echo "0")
+          if [ "$TAG_COUNT" -gt 0 ]; then
+            echo "  - Tags: $TAG_COUNT tag(s) specified"
+          fi
+        fi
+        
+        ENICONFIG_INDEX=$((ENICONFIG_INDEX + 1))
+      done
+      
+      # Check node ENIConfig assignment
+      if [ -s "$NODE_DIR/node_annotations.json" ]; then
+        NODE_ENICONFIG=$(jq -r '.["k8s.amazonaws.com/eniConfig"] // .["vpc.amazonaws.com/eniConfig"] // ""' "$NODE_DIR/node_annotations.json" 2>/dev/null || echo "")
+        if [ -n "$NODE_ENICONFIG" ] && [ "$NODE_ENICONFIG" != "null" ] && [ "$NODE_ENICONFIG" != "" ]; then
+          echo "[INFO] Node ENIConfig assignment: $NODE_ENICONFIG"
+          
+          # Verify assigned ENIConfig exists
+          ENICONFIG_EXISTS=$(jq -r ".items[] | select(.metadata.name == \"$NODE_ENICONFIG\") | .metadata.name" "$ENICONFIG_FILE" 2>/dev/null || echo "")
+          if [ -z "$ENICONFIG_EXISTS" ] || [ "$ENICONFIG_EXISTS" = "" ]; then
+            echo "[ISSUE] Node assigned to ENIConfig '$NODE_ENICONFIG' but this ENIConfig does not exist"
+            issues=$((issues+1))
+            ENICONFIG_ISSUES=1
+          else
+            echo "[OK] Node ENIConfig assignment valid"
+          fi
+        else
+          # Check node labels as fallback
+          if [ -s "$NODE_DIR/node_labels.json" ]; then
+            NODE_ENICONFIG_LABEL=$(jq -r '.["k8s.amazonaws.com/eniConfig"] // .["vpc.amazonaws.com/eniConfig"] // ""' "$NODE_DIR/node_labels.json" 2>/dev/null || echo "")
+            if [ -n "$NODE_ENICONFIG_LABEL" ] && [ "$NODE_ENICONFIG_LABEL" != "null" ] && [ "$NODE_ENICONFIG_LABEL" != "" ]; then
+              echo "[INFO] Node ENIConfig assignment (from label): $NODE_ENICONFIG_LABEL"
+              
+              # Verify assigned ENIConfig exists
+              ENICONFIG_EXISTS=$(jq -r ".items[] | select(.metadata.name == \"$NODE_ENICONFIG_LABEL\") | .metadata.name" "$ENICONFIG_FILE" 2>/dev/null || echo "")
+              if [ -z "$ENICONFIG_EXISTS" ] || [ "$ENICONFIG_EXISTS" = "" ]; then
+                echo "[ISSUE] Node assigned to ENIConfig '$NODE_ENICONFIG_LABEL' but this ENIConfig does not exist"
+                issues=$((issues+1))
+                ENICONFIG_ISSUES=1
+              else
+                echo "[OK] Node ENIConfig assignment valid"
+              fi
+            else
+              echo "[INFO] Node not explicitly assigned to an ENIConfig (may use default or node group settings)"
+            fi
+          fi
+        fi
+      fi
+      
+      if [ "$ENICONFIG_ISSUES" -eq 0 ]; then
+        echo "[OK] No ENIConfig validation issues detected"
+      else
+        echo "[INFO] Recommendation: Verify ENIConfig subnet → AZ mapping matches actual subnets, ensure node assignments are correct"
+      fi
+    else
+      echo "[WARN] Subnet information not available - cannot validate ENIConfig subnet → AZ mapping"
+      warnings=$((warnings+1))
+    fi
+  fi
+else
+  echo "[INFO] ENIConfig data not available (custom networking may not be enabled)"
+fi
+
+echo ""
 echo "=== Readiness Gate Timing ==="
 
 # Check SG-for-Pods readiness gate timing

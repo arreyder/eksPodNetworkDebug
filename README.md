@@ -19,6 +19,7 @@ This toolkit collects comprehensive diagnostics for AWS EKS pods using Security 
 - **Health Probe Analysis**: Analyzes health probe configurations (liveness, readiness, startup), verifies probe ports are listening, checks for probe failures, and validates network access from kubelet
 - **NetworkPolicy Analysis**: Analyzes NetworkPolicies to detect if they block DNS, health probes, metrics, or service traffic, validates podSelector matches, and checks for missing egress rules
 - **DNS / CoreDNS / NodeLocal DNSCache Analysis**: Analyzes DNS infrastructure, CoreDNS pod status and scaling, NodeLocal DNSCache presence and configuration, DNS service endpoints, and DNS resolution tests
+- **Custom Networking / ENIConfig Analysis**: Validates ENIConfig resources (subnet CIDR → AZ mapping), checks node ENIConfig assignments, verifies ENIConfig subnet existence in VPC, and flags configuration mismatches
 - **AMI / CNI / Kernel Drift Analysis**: Detects version mismatches between Kubernetes, kube-proxy, aws-node, OS image (AMI), and kernel versions, flags non-EKS-optimized AMIs, and identifies outdated components
 - **Connectivity Analysis**: Advanced analysis for pod connectivity issues after large churns, including ENI attachment timing, subnet IP availability, CNI log errors, and SYN_SENT connection detection (identifies pods trying to connect but waiting for ACK)
 - **AWS ENI State**: Captures trunk and branch ENI information, subnet IP availability, and instance type details
@@ -43,6 +44,7 @@ Detailed documentation for each diagnostic check is available in the [`doc/`](do
 - [Health Probes](doc/18-health-probes.md)
 - [Network Policies](doc/19-network-policies.md)
 - [DNS / CoreDNS / NodeLocal DNSCache](doc/20-dns-coredns-nodelocal.md)
+- [Custom Networking / ENIConfig](doc/22-custom-networking-eniconfig.md)
 - [Security Group Validation](doc/05-security-group-validation.md)
 - [Network Namespace Leaks](doc/06-network-namespace-leaks.md)
 - [DNS Resolution](doc/08-dns-resolution.md)
@@ -186,6 +188,8 @@ sgfp_bundle_<pod>_<timestamp>/
     node_file_descriptors.txt              # File descriptor usage
     node_memory_info.txt                   # Memory information
     node_k8s_networkpolicies.json          # Kubernetes NetworkPolicies
+    node_eniconfigs.json                   # ENIConfig resources (custom networking)
+    node_annotations.json                  # Node annotations (may contain ENIConfig references)
     node_calico_networkpolicies.yaml       # Calico network policies (if Calico)
     node_bpf_programs.txt                  # eBPF programs (if Cilium)
     node_dmesg_network.txt                 # Network-related kernel messages

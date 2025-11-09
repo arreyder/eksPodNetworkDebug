@@ -774,6 +774,31 @@ if command -v kubectl >/dev/null 2>&1; then
   log "Collected $NP_COUNT Kubernetes NetworkPolicy(ies)"
 fi
 
+# ENIConfig (Custom Networking) - AWS VPC CNI CRD
+log "Collecting ENIConfig resources (custom networking)..."
+if command -v kubectl >/dev/null 2>&1; then
+  # Try cluster-scoped first, then kube-system namespace
+  kubectl get eniconfig -o json > "$OUT/node_eniconfigs.json" 2>/dev/null || \
+    kubectl get eniconfig -n kube-system -o json > "$OUT/node_eniconfigs.json" 2>/dev/null || \
+    echo '{"items":[]}' > "$OUT/node_eniconfigs.json"
+  ENICONFIG_COUNT=$(jq -r '.items | length' "$OUT/node_eniconfigs.json" 2>/dev/null || echo "0")
+  if [ "$ENICONFIG_COUNT" = "0" ]; then
+    # Try alternative CRD name (some clusters use different naming)
+    kubectl get eniconfigs -o json > "$OUT/node_eniconfigs.json" 2>/dev/null || \
+      kubectl get eniconfigs -n kube-system -o json > "$OUT/node_eniconfigs.json" 2>/dev/null || \
+      echo '{"items":[]}' > "$OUT/node_eniconfigs.json"
+    ENICONFIG_COUNT=$(jq -r '.items | length' "$OUT/node_eniconfigs.json" 2>/dev/null || echo "0")
+  fi
+  if [ "$ENICONFIG_COUNT" -gt 0 ]; then
+    log "Collected $ENICONFIG_COUNT ENIConfig resource(s)"
+  else
+    log "No ENIConfig resources found (custom networking may not be enabled)"
+  fi
+  
+  # Collect node annotations (may contain ENIConfig references)
+  kubectl get node "$NODE" -o jsonpath='{.metadata.annotations}' > "$OUT/node_annotations.json" 2>/dev/null || echo '{}' > "$OUT/node_annotations.json"
+fi
+
 # Calico-specific (if available)
 if command -v calicoctl >/dev/null 2>&1; then
   calicoctl get networkpolicies --all-namespaces -o yaml > "$OUT/node_calico_networkpolicies.yaml" 2>/dev/null || echo "" > "$OUT/node_calico_networkpolicies.yaml"
