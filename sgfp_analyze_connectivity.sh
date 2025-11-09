@@ -581,6 +581,104 @@ if [ -n "$NODE_DIR" ]; then
   fi
 fi
 
+# Route table drift analysis
+if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_routes_all.txt" ]; then
+  echo ""
+  echo "=== Route Table Analysis ==="
+  
+  ROUTE_ISSUES=0
+  ROUTES_FILE="$NODE_DIR/node_routes_all.txt"
+  
+  # Check for default route (0.0.0.0/0)
+  DEFAULT_ROUTE=$(grep -E "^default|^0\.0\.0\.0/0" "$ROUTES_FILE" 2>/dev/null | head -1 || echo "")
+  if [ -z "$DEFAULT_ROUTE" ]; then
+    echo "[ISSUE] Default route (0.0.0.0/0) not found - node may not have internet/VPC connectivity"
+    issues=$((issues+1))
+    ROUTE_ISSUES=1
+  else
+    echo "[OK] Default route present: $DEFAULT_ROUTE"
+  fi
+  
+  # Check for VPC subnet routes (if we have subnet info)
+  if [ -n "$AWS_DIR" ] && [ -s "$AWS_DIR/subnets.json" ]; then
+    # Extract subnet CIDRs from AWS data
+    SUBNET_CIDRS=$(jq -r '.[] | .[2]' "$AWS_DIR/subnets.json" 2>/dev/null | grep -v "^null$" | grep -v "^$" || true)
+    
+    if [ -n "$SUBNET_CIDRS" ]; then
+      SUBNET_ROUTE_ISSUES=0
+      MISSING_SUBNET_ROUTES=""
+      while IFS= read -r SUBNET_CIDR; do
+        [ -z "$SUBNET_CIDR" ] && continue
+        # Check if route exists for this subnet (exact match or covers it)
+        # Route format: "10.4.192.0/18 dev eth0" or "10.4.192.0/18 via 10.4.192.1 dev eth0"
+        ROUTE_FOUND=$(grep -E "^${SUBNET_CIDR}|^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+.*dev" "$ROUTES_FILE" 2>/dev/null | grep -E "${SUBNET_CIDR}" | head -1 || echo "")
+        
+        if [ -z "$ROUTE_FOUND" ]; then
+          # Check if any route covers this subnet (broader route)
+          # Extract network portion for comparison
+          SUBNET_NETWORK=$(echo "$SUBNET_CIDR" | cut -d'/' -f1)
+          # Check if default route or broader route exists (simplified check)
+          if [ -z "$DEFAULT_ROUTE" ]; then
+            if [ -z "$MISSING_SUBNET_ROUTES" ]; then
+              MISSING_SUBNET_ROUTES="$SUBNET_CIDR"
+            else
+              MISSING_SUBNET_ROUTES="$MISSING_SUBNET_ROUTES, $SUBNET_CIDR"
+            fi
+            SUBNET_ROUTE_ISSUES=1
+          fi
+        fi
+      done <<< "$SUBNET_CIDRS"
+      
+      if [ "$SUBNET_ROUTE_ISSUES" -eq 1 ] && [ -n "$MISSING_SUBNET_ROUTES" ]; then
+        echo "[WARN] Subnet routes not found for: $MISSING_SUBNET_ROUTES (may use default route)"
+        warnings=$((warnings+1))
+        ROUTE_ISSUES=1
+      fi
+    fi
+  fi
+  
+  # Check for local interface routes (should have route for node's primary IP subnet)
+  # Extract node IP subnet from interface routes
+  NODE_SUBNET_ROUTE=$(grep -E "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+ dev eth0" "$ROUTES_FILE" 2>/dev/null | grep -v "local\|broadcast" | head -1 || echo "")
+  
+  if [ -z "$NODE_SUBNET_ROUTE" ]; then
+    echo "[WARN] Local subnet route not found for primary interface (eth0)"
+    warnings=$((warnings+1))
+    ROUTE_ISSUES=1
+  else
+    echo "[OK] Local subnet route present: $NODE_SUBNET_ROUTE"
+  fi
+  
+  # Check for route to metadata service (169.254.169.254) - important for AWS
+  METADATA_ROUTE=$(grep -E "169\.254\.169\.254|169\.254\.0\.0/16" "$ROUTES_FILE" 2>/dev/null | head -1 || echo "")
+  if [ -z "$METADATA_ROUTE" ]; then
+    # Metadata service route may be implicit via default route, so this is informational
+    if [ -n "$DEFAULT_ROUTE" ]; then
+      echo "[INFO] Explicit route to metadata service (169.254.169.254) not found (using default route)"
+    else
+      echo "[WARN] No route to metadata service (169.254.169.254) and no default route"
+      warnings=$((warnings+1))
+      ROUTE_ISSUES=1
+    fi
+  else
+    echo "[OK] Route to metadata service present: $METADATA_ROUTE"
+  fi
+  
+  # Count total routes (excluding local/broadcast/multicast/loopback)
+  TOTAL_ROUTES=$(grep -vE "^local|^broadcast|^multicast|^::|^fe80|^127\.0\.0" "$ROUTES_FILE" 2>/dev/null | grep -E "^[0-9]|^default" | wc -l | tr -d '[:space:]' || echo "0")
+  if [ "$TOTAL_ROUTES" -lt 2 ]; then
+    echo "[WARN] Very few routes found ($TOTAL_ROUTES) - may indicate routing issues"
+    warnings=$((warnings+1))
+    ROUTE_ISSUES=1
+  else
+    echo "[INFO] Found $TOTAL_ROUTES route(s) (excluding local/broadcast/multicast/loopback)"
+  fi
+  
+  if [ "$ROUTE_ISSUES" -eq 0 ]; then
+    echo "[OK] No route table issues detected"
+  fi
+fi
+
 # Network interface state check
 if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_interfaces_state.txt" ]; then
   echo ""

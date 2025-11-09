@@ -20,6 +20,7 @@ This directory contains detailed documentation for each diagnostic check perform
 14. **[Conntrack Usage](14-conntrack-usage.md)** - Monitors connection tracking usage
 15. **[Socket Overruns](15-socket-overruns.md)** - Detects socket buffer overruns
 16. **[Network Interface States](16-network-interface-states.md)** - Validates interface states
+17. **[Route Table Drift](17-route-table-drift.md)** - Detects missing or incorrect routes
 
 ## Document Structure
 

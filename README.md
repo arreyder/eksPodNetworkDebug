@@ -15,6 +15,7 @@ This toolkit collects comprehensive diagnostics for AWS EKS pods using Security 
 - **MTU Configuration Analysis**: Detects MTU mismatches between pod and node interfaces, identifies fragmentation issues, and checks for multiple MTU values on non-loopback interfaces
 - **Reverse Path Filtering (rp_filter)**: Validates rp_filter settings for pod ENI scenarios, recommends loose mode (rp_filter=2) for asymmetric routing support, and flags security risks
 - **ENI/Instance Limits**: Checks instance type ENI and IP limits, compares current usage vs limits, validates trunk ENI branch ENI count, and estimates max pods capacity
+- **Route Table Drift Analysis**: Detects missing or incorrect routes (default route, subnet routes, metadata service route), validates route consistency, and identifies routing issues
 - **Connectivity Analysis**: Advanced analysis for pod connectivity issues after large churns, including ENI attachment timing, subnet IP availability, CNI log errors, and SYN_SENT connection detection (identifies pods trying to connect but waiting for ACK)
 - **AWS ENI State**: Captures trunk and branch ENI information, subnet IP availability, and instance type details
 - **API Diagnostics**: Analyzes CloudTrail events for ENI-related throttles and errors (with dry-run detection)
@@ -34,6 +35,7 @@ Detailed documentation for each diagnostic check is available in the [`doc/`](do
 - [kube-proxy iptables Analysis](doc/02-kube-proxy-iptables.md)
 - [Reverse Path Filtering (rp_filter)](doc/03-reverse-path-filtering.md)
 - [ENI/Instance Limits](doc/04-eni-instance-limits.md)
+- [Route Table Drift](doc/17-route-table-drift.md)
 - [Security Group Validation](doc/05-security-group-validation.md)
 - [Network Namespace Leaks](doc/06-network-namespace-leaks.md)
 - [DNS Resolution](doc/08-dns-resolution.md)
@@ -295,6 +297,12 @@ Generates a markdown report from the collected bundle.
   - For pod ENI scenarios, recommends rp_filter=2 (loose mode) to allow asymmetric routing
   - Flags rp_filter=1 (strict mode) as a potential issue for pod ENI
   - Warns about rp_filter=0 (disabled) as a security risk
+- **Route Table Drift**:
+  - Validates default route (0.0.0.0/0) presence
+  - Checks local subnet routes
+  - Verifies metadata service route (169.254.169.254)
+  - Compares VPC subnet routes (if available)
+  - Counts total routes and flags anomalies
 - **ENI/Instance Limits**:
   - Shows instance type and ENI/IP limits
   - Compares current ENI usage vs instance limits
@@ -319,6 +327,7 @@ Advanced analysis for diagnosing pod connectivity issues, especially after large
 
 **Features:**
 - Analyzes ENI attachment state and timing
+- **Route Table Drift Analysis**: Validates default route, subnet routes, metadata service route, and route consistency
 - **ENI/Instance Limits Analysis**: Checks instance type ENI/IP limits, current usage, trunk ENI branch ENI count, and estimates max pods
 - Checks IPAMD state and branch ENI limits
 - Validates subnet IP availability

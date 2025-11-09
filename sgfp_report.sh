@@ -900,6 +900,52 @@ if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_interface_ip_stats.txt" ]; then
   rm -f "$MTU_TMP" 2>/dev/null || true
 fi
 
+# Route table analysis
+if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_routes_all.txt" ]; then
+  echo >> "$REPORT"
+  say "[INFO] Route table analysis:"
+  
+  ROUTES_FILE="$NODE_DIR/node_routes_all.txt"
+  
+  # Check for default route
+  DEFAULT_ROUTE=$(grep -E "^default|^0\.0\.0\.0/0" "$ROUTES_FILE" 2>/dev/null | head -1 || echo "")
+  if [ -z "$DEFAULT_ROUTE" ]; then
+    say "[ISSUE] Default route (0.0.0.0/0) not found - node may not have internet/VPC connectivity"
+  else
+    say "[OK] Default route present: $DEFAULT_ROUTE"
+  fi
+  
+  # Check for local subnet route
+  NODE_SUBNET_ROUTE=$(grep -E "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+ dev eth0" "$ROUTES_FILE" 2>/dev/null | grep -v "local\|broadcast" | head -1 || echo "")
+  if [ -z "$NODE_SUBNET_ROUTE" ]; then
+    say "[WARN] Local subnet route not found for primary interface (eth0)"
+  else
+    say "[OK] Local subnet route: $NODE_SUBNET_ROUTE"
+  fi
+  
+  # Check for metadata service route
+  METADATA_ROUTE=$(grep -E "169\.254\.169\.254|169\.254\.0\.0/16" "$ROUTES_FILE" 2>/dev/null | head -1 || echo "")
+  if [ -z "$METADATA_ROUTE" ]; then
+    if [ -n "$DEFAULT_ROUTE" ]; then
+      say "[INFO] Metadata service route not explicit (using default route)"
+    else
+      say "[WARN] No route to metadata service (169.254.169.254)"
+    fi
+  else
+    say "[OK] Metadata service route: $METADATA_ROUTE"
+  fi
+  
+  # Count routes
+  TOTAL_ROUTES=$(grep -vE "^local|^broadcast|^multicast|^::|^fe80|^127\.0\.0" "$ROUTES_FILE" 2>/dev/null | grep -E "^[0-9]|^default" | wc -l | tr -d '[:space:]' || echo "0")
+  if [ "$TOTAL_ROUTES" -lt 2 ]; then
+    say "[WARN] Very few routes found ($TOTAL_ROUTES) - may indicate routing issues"
+  else
+    say "[INFO] Total routes: $TOTAL_ROUTES (excluding local/broadcast/multicast/loopback)"
+  fi
+  
+  say "  - Full route table: \`node_*/node_routes_all.txt\`"
+fi
+
 # iptables rules summary
 if [ -n "$NODE_DIR" ]; then
   NODE_IPTABLES_FILTER="${NODE_DIR}/node_iptables_filter.txt"
