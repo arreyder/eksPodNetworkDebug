@@ -789,6 +789,124 @@ if [ -n "$NODE_DIR" ] && [ -f "$NODE_DIR/node_duplicate_ips.txt" ]; then
   fi
 fi
 
+# Health probe analysis
+if [ -n "$POD_DIR" ] && [ -s "$POD_DIR/pod_full.json" ]; then
+  echo >> "$REPORT"
+  say "[INFO] Health probe analysis:"
+  
+  POD_FULL_JSON="$POD_DIR/pod_full.json"
+  CONTAINERS=$(jq -r '.spec.containers[]?.name // empty' "$POD_FULL_JSON" 2>/dev/null || echo "")
+  
+  if [ -n "$CONTAINERS" ]; then
+    HAS_PROBES=0
+    while IFS= read -r CONTAINER_NAME; do
+      [ -z "$CONTAINER_NAME" ] && continue
+      
+      READINESS_PROBE=$(jq -r --arg name "$CONTAINER_NAME" '.spec.containers[]? | select(.name == $name) | .readinessProbe // "null"' "$POD_FULL_JSON" 2>/dev/null || echo "null")
+      LIVENESS_PROBE=$(jq -r --arg name "$CONTAINER_NAME" '.spec.containers[]? | select(.name == $name) | .livenessProbe // "null"' "$POD_FULL_JSON" 2>/dev/null || echo "null")
+      STARTUP_PROBE=$(jq -r --arg name "$CONTAINER_NAME" '.spec.containers[]? | select(.name == $name) | .startupProbe // "null"' "$POD_FULL_JSON" 2>/dev/null || echo "null")
+      
+      if [ "$READINESS_PROBE" != "null" ] && [ "$READINESS_PROBE" != "" ]; then
+        HAS_PROBES=1
+        # Check if httpGet exists
+        if jq -e '.httpGet' <<< "$READINESS_PROBE" >/dev/null 2>&1; then
+          PROBE_PORT=$(jq -r '.httpGet.port // "unknown"' <<< "$READINESS_PROBE" 2>/dev/null || echo "unknown")
+          PROBE_PATH=$(jq -r '.httpGet.path // "/"' <<< "$READINESS_PROBE" 2>/dev/null || echo "/")
+          PROBE_SCHEME=$(jq -r '.httpGet.scheme // "HTTP"' <<< "$READINESS_PROBE" 2>/dev/null || echo "HTTP")
+          say "  - Container '$CONTAINER_NAME': Readiness probe - $PROBE_SCHEME on port $PROBE_PORT, path: $PROBE_PATH"
+          
+          # Check if port is listening
+          if [ -s "$POD_DIR/pod_connections.txt" ]; then
+            if grep -qE ":$PROBE_PORT[[:space:]]|LISTEN.*:$PROBE_PORT" "$POD_DIR/pod_connections.txt" 2>/dev/null; then
+              say "[OK] Readiness probe port $PROBE_PORT is listening"
+            else
+              say "[WARN] Readiness probe port $PROBE_PORT not found in listening ports"
+            fi
+          fi
+        elif jq -e '.tcpSocket' <<< "$READINESS_PROBE" >/dev/null 2>&1; then
+          PROBE_PORT=$(jq -r '.tcpSocket.port // "unknown"' <<< "$READINESS_PROBE" 2>/dev/null || echo "unknown")
+          say "  - Container '$CONTAINER_NAME': Readiness probe - TCP on port $PROBE_PORT"
+        fi
+      fi
+      
+      if [ "$LIVENESS_PROBE" != "null" ] && [ "$LIVENESS_PROBE" != "" ]; then
+        HAS_PROBES=1
+        # Check if httpGet exists
+        if jq -e '.httpGet' <<< "$LIVENESS_PROBE" >/dev/null 2>&1; then
+          PROBE_PORT=$(jq -r '.httpGet.port // "unknown"' <<< "$LIVENESS_PROBE" 2>/dev/null || echo "unknown")
+          PROBE_PATH=$(jq -r '.httpGet.path // "/"' <<< "$LIVENESS_PROBE" 2>/dev/null || echo "/")
+          PROBE_SCHEME=$(jq -r '.httpGet.scheme // "HTTP"' <<< "$LIVENESS_PROBE" 2>/dev/null || echo "HTTP")
+          say "  - Container '$CONTAINER_NAME': Liveness probe - $PROBE_SCHEME on port $PROBE_PORT, path: $PROBE_PATH"
+        elif jq -e '.tcpSocket' <<< "$LIVENESS_PROBE" >/dev/null 2>&1; then
+          PROBE_PORT=$(jq -r '.tcpSocket.port // "unknown"' <<< "$LIVENESS_PROBE" 2>/dev/null || echo "unknown")
+          say "  - Container '$CONTAINER_NAME': Liveness probe - TCP on port $PROBE_PORT"
+        fi
+      fi
+      
+      if [ "$STARTUP_PROBE" != "null" ] && [ "$STARTUP_PROBE" != "" ]; then
+        HAS_PROBES=1
+        # Check if httpGet exists
+        if jq -e '.httpGet' <<< "$STARTUP_PROBE" >/dev/null 2>&1; then
+          PROBE_PORT=$(jq -r '.httpGet.port // "unknown"' <<< "$STARTUP_PROBE" 2>/dev/null || echo "unknown")
+          PROBE_PATH=$(jq -r '.httpGet.path // "/"' <<< "$STARTUP_PROBE" 2>/dev/null || echo "/")
+          PROBE_SCHEME=$(jq -r '.httpGet.scheme // "HTTP"' <<< "$STARTUP_PROBE" 2>/dev/null || echo "HTTP")
+          say "  - Container '$CONTAINER_NAME': Startup probe - $PROBE_SCHEME on port $PROBE_PORT, path: $PROBE_PATH"
+        elif jq -e '.tcpSocket' <<< "$STARTUP_PROBE" >/dev/null 2>&1; then
+          PROBE_PORT=$(jq -r '.tcpSocket.port // "unknown"' <<< "$STARTUP_PROBE" 2>/dev/null || echo "unknown")
+          say "  - Container '$CONTAINER_NAME': Startup probe - TCP on port $PROBE_PORT"
+        fi
+      fi
+    done <<< "$CONTAINERS"
+    
+    if [ "$HAS_PROBES" -eq 0 ]; then
+      say "[WARN] No health probes configured for any container"
+    fi
+  fi
+  
+  # Check pod conditions
+  if [ -s "$POD_DIR/pod_conditions.json" ]; then
+    READY_STATUS=$(jq -r '.[]? | select(.type == "Ready") | .status // "Unknown"' "$POD_DIR/pod_conditions.json" 2>/dev/null || echo "Unknown")
+    CONTAINERS_READY_STATUS=$(jq -r '.[]? | select(.type == "ContainersReady") | .status // "Unknown"' "$POD_DIR/pod_conditions.json" 2>/dev/null || echo "Unknown")
+    
+    if [ "$READY_STATUS" = "False" ]; then
+      READY_REASON=$(jq -r '.[]? | select(.type == "Ready") | .reason // "Unknown"' "$POD_DIR/pod_conditions.json" 2>/dev/null || echo "Unknown")
+      say "[ISSUE] Pod Ready condition is False (reason: $READY_REASON)"
+    elif [ "$READY_STATUS" = "True" ]; then
+      say "[OK] Pod Ready condition is True"
+    fi
+    
+    if [ "$CONTAINERS_READY_STATUS" = "False" ]; then
+      CONTAINERS_READY_REASON=$(jq -r '.[]? | select(.type == "ContainersReady") | .reason // "Unknown"' "$POD_DIR/pod_conditions.json" 2>/dev/null || echo "Unknown")
+      say "[ISSUE] ContainersReady condition is False (reason: $CONTAINERS_READY_REASON)"
+    elif [ "$CONTAINERS_READY_STATUS" = "True" ]; then
+      say "[OK] ContainersReady condition is True"
+    fi
+  fi
+  
+  # Check for probe failures in events
+  if [ -s "$POD_DIR/pod_events.txt" ]; then
+    PROBE_FAILURES=$(grep -iE "probe.*fail|unhealthy|readiness.*fail|liveness.*fail" "$POD_DIR/pod_events.txt" 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+    if [ "$PROBE_FAILURES" != "0" ] && [ "$PROBE_FAILURES" -gt 0 ]; then
+      say "[ISSUE] Found $PROBE_FAILURES probe failure event(s) in pod events"
+    fi
+  fi
+  
+  # Check NetworkPolicies and node SG
+  if [ -s "$NODE_DIR/node_k8s_networkpolicies.json" ]; then
+    NP_COUNT=$(jq -r 'length' "$NODE_DIR/node_k8s_networkpolicies.json" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    if [ "$NP_COUNT" != "0" ] && [ "$NP_COUNT" -gt 0 ]; then
+      say "[INFO] Found $NP_COUNT NetworkPolicy(ies) - verify they allow ingress from node for health probes"
+    fi
+  fi
+  
+  if [ -n "$AWS_DIR" ] && [ -s "$AWS_DIR/all_instance_enis.json" ]; then
+    NODE_SGS=$(jq -r '.[0]?.Groups[]?.GroupId // empty' "$AWS_DIR/all_instance_enis.json" 2>/dev/null | grep -v "^$" | head -3 | tr '\n' ',' | sed 's/,$//' || echo "")
+    if [ -n "$NODE_SGS" ]; then
+      say "[INFO] Node Security Groups: $NODE_SGS - verify they allow ingress to pod on probe ports"
+    fi
+  fi
+fi
+
 # DNS resolution
 if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_dns_tests.txt" ]; then
   echo >> "$REPORT"
