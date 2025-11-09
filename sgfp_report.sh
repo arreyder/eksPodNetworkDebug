@@ -845,6 +845,61 @@ if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_interfaces_state.txt" ]; then
   fi
 fi
 
+# MTU configuration
+if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_interface_ip_stats.txt" ]; then
+  echo >> "$REPORT"
+  MTU_TMP=$(mktemp)
+  # Extract MTU from non-loopback interfaces
+  grep -E "^[0-9]+:" "$NODE_DIR/node_interface_ip_stats.txt" 2>/dev/null | grep -v " lo:" | grep -oE "mtu [0-9]+" | sed 's/mtu //' | sort -u > "$MTU_TMP" || true
+  
+  if [ -s "$MTU_TMP" ]; then
+    MTU_COUNT=$(wc -l < "$MTU_TMP" | tr -d '[:space:]' || echo "0")
+    MTU_VALUES=$(cat "$MTU_TMP" | tr '\n' ',' | sed 's/,$//')
+    
+    if [ "$MTU_COUNT" -gt 1 ]; then
+      say "[WARN] Multiple MTU values found on node interfaces: $MTU_VALUES"
+      # Show interface breakdown
+      grep -E "^[0-9]+:" "$NODE_DIR/node_interface_ip_stats.txt" 2>/dev/null | grep -v " lo:" | grep -oE "^[0-9]+:[^:]+:.*mtu [0-9]+" | head -5 | sed 's/^/    /' >> "$REPORT" 2>/dev/null || true
+    else
+      MTU_VALUE=$(cat "$MTU_TMP" | head -1 | tr -d '[:space:]' || echo "")
+      if [ -n "$MTU_VALUE" ]; then
+        if [ "$MTU_VALUE" = "1500" ]; then
+          say "[OK] Standard MTU (1500) on all interfaces"
+        elif [ "$MTU_VALUE" = "9001" ]; then
+          say "[OK] Jumbo frames enabled (MTU 9001)"
+        else
+          say "[INFO] MTU: $MTU_VALUE on all interfaces"
+        fi
+      fi
+    fi
+    
+    # Check pod MTU if available
+    if [ -s "$POD_DIR/pod_interface_stats.txt" ] && ! grep -qi "not available\|command failed" "$POD_DIR/pod_interface_stats.txt" 2>/dev/null; then
+      POD_MTU_TMP=$(mktemp)
+      grep -oE "mtu [0-9]+" "$POD_DIR/pod_interface_stats.txt" 2>/dev/null | sed 's/mtu //' | sort -u > "$POD_MTU_TMP" || true
+      if [ -s "$POD_MTU_TMP" ]; then
+        POD_MTU=$(cat "$POD_MTU_TMP" | head -1 | tr -d '[:space:]' || echo "")
+        if [ -n "$POD_MTU" ] && [ -s "$MTU_TMP" ]; then
+          NODE_MTU=$(cat "$MTU_TMP" | head -1 | tr -d '[:space:]' || echo "")
+          if [ -n "$NODE_MTU" ] && [ "$POD_MTU" != "$NODE_MTU" ]; then
+            say "[ISSUE] MTU mismatch: pod ($POD_MTU) != node ($NODE_MTU) - may cause fragmentation"
+          fi
+        fi
+      fi
+      rm -f "$POD_MTU_TMP" 2>/dev/null || true
+    fi
+    
+    # Check for fragmentation hints in kernel logs
+    if [ -s "$NODE_DIR/node_dmesg_network.txt" ]; then
+      FRAG_HINTS=$(grep -iE "fragmentation needed|frag.*drop|mtu.*exceed" "$NODE_DIR/node_dmesg_network.txt" 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+      if [ "$FRAG_HINTS" != "0" ] && [ "$FRAG_HINTS" -gt 0 ]; then
+        say "[ISSUE] Found $FRAG_HINTS fragmentation-related message(s) in kernel logs"
+      fi
+    fi
+  fi
+  rm -f "$MTU_TMP" 2>/dev/null || true
+fi
+
 # iptables rules summary
 if [ -n "$NODE_DIR" ]; then
   NODE_IPTABLES_FILTER="${NODE_DIR}/node_iptables_filter.txt"

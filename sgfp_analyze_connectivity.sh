@@ -450,6 +450,92 @@ if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_interfaces_state.txt" ]; then
   fi
 fi
 
+# MTU mismatch / fragmentation check
+if [ -n "$NODE_DIR" ]; then
+  echo ""
+  echo "=== MTU Configuration ==="
+  
+  MTU_ISSUES=0
+  MTU_TMP=$(mktemp)
+  
+  # Extract MTU values from node interfaces (excluding loopback)
+  if [ -s "$NODE_DIR/node_interface_ip_stats.txt" ]; then
+    # Extract MTU from ip -s link output, excluding loopback interfaces
+    # Format: "1: lo: <...> mtu 65536 ..." or "5: eth0: <...> mtu 1500 ..."
+    grep -E "^[0-9]+:" "$NODE_DIR/node_interface_ip_stats.txt" 2>/dev/null | grep -v " lo:" | grep -oE "mtu [0-9]+" | sed 's/mtu //' | sort -u > "$MTU_TMP" || true
+    
+    if [ -s "$MTU_TMP" ]; then
+      MTU_COUNT=$(wc -l < "$MTU_TMP" | tr -d '[:space:]' || echo "0")
+      MTU_VALUES=$(cat "$MTU_TMP" | tr '\n' ',' | sed 's/,$//')
+      
+      if [ "$MTU_COUNT" -gt 1 ]; then
+        echo "[WARN] Multiple MTU values found on node interfaces (excluding loopback): $MTU_VALUES"
+        warnings=$((warnings+1))
+        MTU_ISSUES=1
+        
+        # Show which interfaces have which MTU (excluding loopback)
+        echo "[INFO] Interface MTU breakdown:"
+        grep -E "^[0-9]+:" "$NODE_DIR/node_interface_ip_stats.txt" 2>/dev/null | grep -v " lo:" | grep -oE "^[0-9]+:[^:]+:.*mtu [0-9]+" | sed 's/^/  - /' | head -10
+      else
+        MTU_VALUE=$(cat "$MTU_TMP" | head -1 | tr -d '[:space:]' || echo "")
+        if [ -n "$MTU_VALUE" ]; then
+          if [ "$MTU_VALUE" = "1500" ]; then
+            echo "[OK] Standard MTU (1500) on all non-loopback interfaces"
+          elif [ "$MTU_VALUE" = "9001" ]; then
+            echo "[OK] Jumbo frames enabled (MTU 9001) on all non-loopback interfaces"
+          elif [ "$MTU_VALUE" -lt 1500 ]; then
+            echo "[WARN] Unusually low MTU ($MTU_VALUE) - may cause fragmentation issues"
+            warnings=$((warnings+1))
+            MTU_ISSUES=1
+          elif [ "$MTU_VALUE" -gt 9001 ]; then
+            echo "[WARN] Unusually high MTU ($MTU_VALUE) - may not be supported by network"
+            warnings=$((warnings+1))
+            MTU_ISSUES=1
+          else
+            echo "[INFO] MTU: $MTU_VALUE on all non-loopback interfaces"
+          fi
+        fi
+      fi
+    fi
+  fi
+  
+  # Check pod interface MTU if available
+  if [ -s "$POD_DIR/pod_interface_stats.txt" ] && ! grep -qi "not available\|command failed" "$POD_DIR/pod_interface_stats.txt" 2>/dev/null; then
+    POD_MTU_TMP=$(mktemp)
+    grep -oE "mtu [0-9]+" "$POD_DIR/pod_interface_stats.txt" 2>/dev/null | sed 's/mtu //' | sort -u > "$POD_MTU_TMP" || true
+    
+    if [ -s "$POD_MTU_TMP" ]; then
+      POD_MTU=$(cat "$POD_MTU_TMP" | head -1 | tr -d '[:space:]' || echo "")
+      if [ -n "$POD_MTU" ] && [ -s "$MTU_TMP" ]; then
+        NODE_MTU=$(cat "$MTU_TMP" | head -1 | tr -d '[:space:]' || echo "")
+        if [ -n "$NODE_MTU" ] && [ "$POD_MTU" != "$NODE_MTU" ]; then
+          echo "[ISSUE] MTU mismatch: pod interface ($POD_MTU) != node interface ($NODE_MTU) - may cause fragmentation"
+          issues=$((issues+1))
+          MTU_ISSUES=1
+        fi
+      fi
+    fi
+    rm -f "$POD_MTU_TMP" 2>/dev/null || true
+  fi
+  
+  # Check for fragmentation hints in kernel logs
+  if [ -s "$NODE_DIR/node_dmesg_network.txt" ]; then
+    FRAG_HINTS=$(grep -iE "fragmentation needed|frag.*drop|mtu.*exceed" "$NODE_DIR/node_dmesg_network.txt" 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+    if [ "$FRAG_HINTS" != "0" ] && [ "$FRAG_HINTS" -gt 0 ]; then
+      echo "[ISSUE] Found $FRAG_HINTS fragmentation-related message(s) in kernel logs"
+      grep -iE "fragmentation needed|frag.*drop|mtu.*exceed" "$NODE_DIR/node_dmesg_network.txt" 2>/dev/null | head -3 | sed 's/^/  - /'
+      issues=$((issues+1))
+      MTU_ISSUES=1
+    fi
+  fi
+  
+  if [ "$MTU_ISSUES" -eq 0 ]; then
+    echo "[OK] No MTU configuration issues detected"
+  fi
+  
+  rm -f "$MTU_TMP" 2>/dev/null || true
+fi
+
 echo ""
 echo "=== Readiness Gate Timing ==="
 
