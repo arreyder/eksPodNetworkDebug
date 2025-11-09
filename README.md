@@ -13,6 +13,8 @@ This toolkit collects comprehensive diagnostics for AWS EKS pods using Security 
 - **Connectivity Analysis**: Advanced analysis for pod connectivity issues after large churns, including ENI attachment timing, subnet IP availability, and CNI log errors
 - **AWS ENI State**: Captures trunk and branch ENI information, subnet IP availability
 - **API Diagnostics**: Analyzes CloudTrail events for ENI-related throttles and errors (with dry-run detection)
+- **Log Files Summary**: Report includes concise summary of all log files with error counts and file paths
+- **View Related Logs Helper**: Helper script to easily view pod-specific log lines from collected bundles
 - **Node Debug Pod**: Helper script to create debug pods on nodes (supports pod name or node name)
 - **All-in-One Doctor Script**: Single command to collect, analyze, and report
 - **Consistent Output Format**: Uses `[PREFIX]` format for clear, parseable output
@@ -245,7 +247,9 @@ Generates a markdown report from the collected bundle.
   - Conntrack connections with direction labels (INBOUND/OUTBOUND)
   - Same-node vs cross-node vs external connection identification
   - Connection states (ESTABLISHED, CLOSE, TIME_WAIT, etc.)
-- Related logs (pod-specific log lines from CNI logs and aws-node logs)
+- **Log Files Summary**: Concise list of all log files with error counts and file paths
+- **Node CNI Logs**: Shows CNI log errors with recent examples in the Node State section
+- **View Related Logs**: Provides helper script commands to view pod-specific log lines
 - Uses consistent `[OK]`, `[ISSUE]`, `[INFO]` format
 
 ### `sgfp_post_analyze.sh` - Quick Analysis
@@ -292,6 +296,26 @@ Creates a debug pod on a node for interactive troubleshooting.
 - Uses `kubectl debug node/` for proper node debugging
 - Defaults to `ubuntu` image
 
+### `sgfp_view_logs.sh` - View Related Logs
+Helper script to view pod-specific log lines from a diagnostic bundle.
+
+```bash
+# View all pod-related log lines
+./sgfp_view_logs.sh <bundle-dir>
+
+# View only errors/warnings
+./sgfp_view_logs.sh <bundle-dir> --errors-only
+
+# View all log lines (not filtered)
+./sgfp_view_logs.sh <bundle-dir> --all-logs
+```
+
+**Features:**
+- Automatically extracts pod identifiers (pod name, container ID, ENI ID, IP, UID) from bundle
+- Searches all log files (aws-node logs, CNI logs) for pod-related lines
+- Three modes: default (pod-related), errors-only, or all-logs
+- Shows which search patterns are being used
+
 ## Security Group Validation
 
 The toolkit automatically validates Security Groups by:
@@ -336,6 +360,7 @@ make analyze BUNDLE=<dir>              # Post-analyze
 make analyze-connectivity BUNDLE=<dir> # Connectivity analysis
 make doctor POD=<pod> NS=default       # All-in-one
 make node-debug TARGET=<pod|node>      # Create debug pod on node
+make view-logs BUNDLE=<dir>            # View pod-related log lines
 make clean                             # Remove all diagnostic output directories
 make clean-debug-pods NS=<namespace>   # Clean up debug pods interactively
 ```
@@ -354,6 +379,8 @@ make clean-debug-pods NS=<namespace>   # Clean up debug pods interactively
   - Conntrack connections show both directions (INBOUND TO pod and OUTBOUND FROM pod) with connection states
   - Connections are identified as same-node (pod on same node), cross-node (pod on different node in VPC), or external (outside VPC)
   - This helps diagnose if connectivity issues are local to the node or cross-node networking problems
+- **Log Files Summary**: The report includes a concise summary of all log files with error counts and file paths, making it easy to identify which logs need attention
+- **View Related Logs Helper**: The `sgfp_view_logs.sh` script automatically extracts pod identifiers and searches all log files for pod-related lines, with options to view only errors or all logs
 - **Network Namespace Matching**: Attempts to match pod's network namespace using container ID (with fallback to pod UID) to handle AWS CNI's hashed namespace naming scheme
 - **Leak Detection**: Only flags empty network namespaces as issues if they're older than 1 hour (to avoid false positives from transient cleanup states)
 - **Node Debug Pod**: The `sgfp_node_debug.sh` script can accept either a pod name (will find the node) or a node name directly.
