@@ -826,21 +826,7 @@ if [ -n "$POD_DIR" ] && [ -s "$POD_DIR/pod_full.json" ]; then
     fi
   fi
   
-  # Check if NetworkPolicies might block probes (from node to pod)
-  if [ -s "$NODE_DIR/node_k8s_networkpolicies.json" ] && [ "$POD_IP" != "unknown" ]; then
-    # Get node IP (if available)
-    NODE_IP=$(grep -E "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" "$NODE_DIR/node_all_ips.txt" 2>/dev/null | grep -v "127.0.0.1" | head -1 || echo "")
-    
-    if [ -n "$NODE_IP" ]; then
-      # Check if any NetworkPolicy might block traffic from node IP to pod IP
-      # This is a simplified check - full analysis would require parsing NetworkPolicy rules
-      NP_COUNT=$(jq -r 'length' "$NODE_DIR/node_k8s_networkpolicies.json" 2>/dev/null | tr -d '[:space:]' || echo "0")
-      if [ "$NP_COUNT" != "0" ] && [ "$NP_COUNT" -gt 0 ]; then
-        echo "[INFO] Found $NP_COUNT NetworkPolicy(ies) - verify they allow ingress from node IP ($NODE_IP) for health probes"
-        # Note: Full NetworkPolicy analysis would require parsing selectors and rules
-      fi
-    fi
-  fi
+  # NetworkPolicy analysis will be done in a separate section
   
   # Check if node SG allows probe traffic (if we have node SG info)
   if [ -n "$AWS_DIR" ] && [ -s "$AWS_DIR/all_instance_enis.json" ]; then
@@ -1118,6 +1104,193 @@ if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_rp_filter.txt" ]; then
   
   if [ "$RP_FILTER_ISSUES" -eq 0 ]; then
     echo "[OK] No reverse path filtering issues detected"
+  fi
+fi
+
+echo ""
+# NetworkPolicy analysis
+if [ -n "$POD_DIR" ] && [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_k8s_networkpolicies.json" ]; then
+  echo ""
+  echo "=== NetworkPolicy Analysis ==="
+  
+  NP_ISSUES=0
+  NP_FILE="$NODE_DIR/node_k8s_networkpolicies.json"
+  
+  # Get pod namespace and labels
+  POD_NAMESPACE=$(jq -r '.metadata.namespace // "default"' "$POD_DIR/pod_full.json" 2>/dev/null || echo "default")
+  POD_LABELS=$(jq -r '.metadata.labels // {}' "$POD_DIR/pod_full.json" 2>/dev/null || echo "{}")
+  
+  # Get node IP for health probe checks
+  NODE_IP=$(grep -E "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" "$NODE_DIR/node_all_ips.txt" 2>/dev/null | grep -v "127.0.0.1" | head -1 || echo "")
+  
+  # Count NetworkPolicies
+  NP_COUNT=$(jq -r '.items | length' "$NP_FILE" 2>/dev/null | tr -d '[:space:]' || echo "0")
+  
+  if [ "$NP_COUNT" = "0" ] || [ -z "$NP_COUNT" ]; then
+    echo "[OK] No NetworkPolicies found in cluster"
+  else
+    echo "[INFO] Found $NP_COUNT NetworkPolicy(ies) in cluster"
+    
+    # Find NetworkPolicies that apply to this pod (same namespace and matching podSelector)
+    APPLICABLE_NPS=0
+    MISSING_DNS_EGRESS=0
+    MISSING_METRICS_EGRESS=0
+    RESTRICTIVE_INGRESS=0
+    
+    # Function to check if podSelector matches pod labels
+    check_pod_selector() {
+      local selector="$1"
+      local pod_labels="$2"
+      
+      # Empty selector matches all pods
+      if [ -z "$selector" ] || [ "$selector" = "{}" ] || [ "$selector" = "null" ]; then
+        return 0
+      fi
+      
+      # Check matchLabels
+      if echo "$selector" | jq -e '.matchLabels' >/dev/null 2>&1; then
+        local match_labels=$(echo "$selector" | jq -r '.matchLabels // {}')
+        while IFS='=' read -r key value; do
+          [ -z "$key" ] && continue
+          local pod_value=$(echo "$pod_labels" | jq -r --arg k "$key" '.[$k] // ""')
+          if [ "$pod_value" != "$value" ]; then
+            return 1  # Label doesn't match
+          fi
+        done <<< "$(echo "$match_labels" | jq -r 'to_entries[] | "\(.key)=\(.value)"')"
+      fi
+      
+      # Check matchExpressions (simplified - would need full evaluation)
+      if echo "$selector" | jq -e '.matchExpressions' >/dev/null 2>&1; then
+        # For now, we'll note that matchExpressions exist but not fully evaluate them
+        # This is a limitation - full evaluation would require more complex logic
+        echo "[INFO] NetworkPolicy uses matchExpressions (not fully evaluated)"
+      fi
+      
+      return 0  # Matches
+    }
+    
+    # Analyze each NetworkPolicy
+    NP_INDEX=0
+    while [ "$NP_INDEX" -lt "$NP_COUNT" ]; do
+      np_json=$(jq -r --argjson idx "$NP_INDEX" '.items[$idx]' "$NP_FILE" 2>/dev/null || echo "")
+      [ -z "$np_json" ] || [ "$np_json" = "null" ] && { NP_INDEX=$((NP_INDEX + 1)); continue; }
+      
+      NP_NAME=$(echo "$np_json" | jq -r '.metadata.name // "unknown"' 2>/dev/null || echo "unknown")
+      NP_NAMESPACE=$(echo "$np_json" | jq -r '.metadata.namespace // "default"' 2>/dev/null || echo "default")
+      POD_SELECTOR=$(echo "$np_json" | jq -r '.spec.podSelector // {}' 2>/dev/null || echo "{}")
+      POLICY_TYPES=$(echo "$np_json" | jq -r '.spec.policyTypes // ["Ingress", "Egress"]' 2>/dev/null || echo '["Ingress", "Egress"]')
+      INGRESS_RULES=$(echo "$np_json" | jq -r '.spec.ingress // []' 2>/dev/null || echo "[]")
+      EGRESS_RULES=$(echo "$np_json" | jq -r '.spec.egress // []' 2>/dev/null || echo "[]")
+      
+      # Only check policies in the same namespace
+      if [ "$NP_NAMESPACE" != "$POD_NAMESPACE" ]; then
+        continue
+      fi
+      
+      # Check if podSelector matches this pod
+      if check_pod_selector "$POD_SELECTOR" "$POD_LABELS" 2>/dev/null; then
+        APPLICABLE_NPS=$((APPLICABLE_NPS + 1))
+        echo "[INFO] NetworkPolicy '$NP_NAME' in namespace '$NP_NAMESPACE' applies to this pod"
+        
+        # Check policy types
+        HAS_INGRESS=$(echo "$POLICY_TYPES" | jq -r '.[]? | select(. == "Ingress")' 2>/dev/null || echo "")
+        HAS_EGRESS=$(echo "$POLICY_TYPES" | jq -r '.[]? | select(. == "Egress")' 2>/dev/null || echo "")
+        
+        # Check ingress rules
+        if [ -n "$HAS_INGRESS" ]; then
+          INGRESS_COUNT=$(echo "$INGRESS_RULES" | jq -r 'length' 2>/dev/null || echo "0")
+          if [ "$INGRESS_COUNT" = "0" ]; then
+            echo "[WARN] NetworkPolicy '$NP_NAME' has Ingress policy type but no ingress rules - all ingress blocked"
+            warnings=$((warnings+1))
+            RESTRICTIVE_INGRESS=1
+            NP_ISSUES=1
+          else
+            # Check if ingress allows from node (for health probes)
+            ALLOWS_NODE=0
+            if [ -n "$NODE_IP" ]; then
+              # Check if any ingress rule allows from all sources (empty from array or null)
+              ALLOWS_ALL=$(echo "$INGRESS_RULES" | jq -r '[.[] | select(.from == null or (.from | length == 0))] | length' 2>/dev/null || echo "0")
+              if [ "$ALLOWS_ALL" != "0" ] && [ "$ALLOWS_ALL" -gt 0 ]; then
+                ALLOWS_NODE=1
+              else
+                # Check if any ingress rule has ipBlock that might include node IP
+                # This is simplified - full CIDR matching would require more complex logic
+                HAS_IPBLOCK=$(echo "$INGRESS_RULES" | jq -r '[.[] | select(.from[]?.ipBlock != null)] | length' 2>/dev/null || echo "0")
+                if [ "$HAS_IPBLOCK" != "0" ] && [ "$HAS_IPBLOCK" -gt 0 ]; then
+                  # Note that we can't fully validate CIDR matching without more complex logic
+                  echo "[INFO] NetworkPolicy '$NP_NAME' has ipBlock rules - verify they allow node IP ($NODE_IP) for health probes"
+                else
+                  # Check for namespaceSelector or podSelector that might allow from nodes
+                  HAS_SELECTOR=$(echo "$INGRESS_RULES" | jq -r '[.[] | select(.from[]?.namespaceSelector != null or .from[]?.podSelector != null)] | length' 2>/dev/null || echo "0")
+                  if [ "$HAS_SELECTOR" = "0" ]; then
+                    echo "[WARN] NetworkPolicy '$NP_NAME' may block health probes from node ($NODE_IP) - no catch-all or node-specific ingress rules"
+                    warnings=$((warnings+1))
+                    RESTRICTIVE_INGRESS=1
+                    NP_ISSUES=1
+                  fi
+                fi
+              fi
+            fi
+          fi
+        fi
+        
+        # Check egress rules
+        if [ -n "$HAS_EGRESS" ]; then
+          EGRESS_COUNT=$(echo "$EGRESS_RULES" | jq -r 'length' 2>/dev/null || echo "0")
+          if [ "$EGRESS_COUNT" = "0" ]; then
+            echo "[WARN] NetworkPolicy '$NP_NAME' has Egress policy type but no egress rules - all egress blocked (DNS/metrics will fail)"
+            issues=$((issues+1))
+            MISSING_DNS_EGRESS=1
+            NP_ISSUES=1
+          else
+            # Check for DNS egress (port 53 UDP/TCP)
+            HAS_DNS_EGRESS=$(echo "$EGRESS_RULES" | jq -r '[.[] | select(.ports[]?.port // .ports[]?.protocol // "" | tostring | test("53|DNS|dns"))] | length' 2>/dev/null || echo "0")
+            if [ "$HAS_DNS_EGRESS" = "0" ]; then
+              # Check if there's a catch-all egress rule
+              HAS_CATCHALL=$(echo "$EGRESS_RULES" | jq -r '[.[] | select(.to == null or (.to | length == 0))] | length' 2>/dev/null || echo "0")
+              if [ "$HAS_CATCHALL" = "0" ]; then
+                echo "[WARN] NetworkPolicy '$NP_NAME' may block DNS egress (port 53) - DNS resolution may fail"
+                warnings=$((warnings+1))
+                MISSING_DNS_EGRESS=1
+                NP_ISSUES=1
+              fi
+            fi
+            
+            # Check for metrics egress (common ports: 8080, 9090, 10250, etc.)
+            HAS_METRICS_EGRESS=$(echo "$EGRESS_RULES" | jq -r '[.[] | select(.ports[]?.port // "" | tostring | test("8080|9090|10250|9100"))] | length' 2>/dev/null || echo "0")
+            if [ "$HAS_METRICS_EGRESS" = "0" ]; then
+              HAS_CATCHALL=$(echo "$EGRESS_RULES" | jq -r '[.[] | select(.to == null or (.to | length == 0))] | length' 2>/dev/null || echo "0")
+              if [ "$HAS_CATCHALL" = "0" ]; then
+                echo "[INFO] NetworkPolicy '$NP_NAME' may restrict metrics egress - verify metrics endpoints are allowed"
+              fi
+            fi
+          fi
+        fi
+      fi
+      NP_INDEX=$((NP_INDEX + 1))
+    done
+    
+    if [ "$APPLICABLE_NPS" -eq 0 ]; then
+      echo "[OK] No NetworkPolicies apply to this pod (no matching podSelector in namespace '$POD_NAMESPACE')"
+    else
+      echo "[INFO] Found $APPLICABLE_NPS NetworkPolicy(ies) that apply to this pod"
+      
+      if [ "$MISSING_DNS_EGRESS" -eq 1 ]; then
+        echo "[ISSUE] Some NetworkPolicies may block DNS egress - DNS resolution may fail"
+        issues=$((issues+1))
+        NP_ISSUES=1
+      fi
+      
+      if [ "$RESTRICTIVE_INGRESS" -eq 1 ]; then
+        echo "[WARN] Some NetworkPolicies may block health probes or service traffic"
+        warnings=$((warnings+1))
+        NP_ISSUES=1
+      fi
+    fi
+    
+    if [ "$NP_ISSUES" -eq 0 ]; then
+      echo "[OK] No NetworkPolicy issues detected"
+    fi
   fi
 fi
 

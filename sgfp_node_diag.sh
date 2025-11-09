@@ -639,8 +639,8 @@ log "Checking network policy enforcement..."
 
 # Kubernetes NetworkPolicies (cluster-wide)
 if command -v kubectl >/dev/null 2>&1; then
-  kubectl get networkpolicies --all-namespaces -o json > "$OUT/node_k8s_networkpolicies.json" 2>/dev/null || echo "[]" > "$OUT/node_k8s_networkpolicies.json"
-  NP_COUNT=$(jq -r 'length' "$OUT/node_k8s_networkpolicies.json" 2>/dev/null || echo "0")
+  kubectl get networkpolicies --all-namespaces -o json > "$OUT/node_k8s_networkpolicies.json" 2>/dev/null || echo '{"items":[]}' > "$OUT/node_k8s_networkpolicies.json"
+  NP_COUNT=$(jq -r '.items | length' "$OUT/node_k8s_networkpolicies.json" 2>/dev/null || echo "0")
   log "Collected $NP_COUNT Kubernetes NetworkPolicy(ies)"
 fi
 

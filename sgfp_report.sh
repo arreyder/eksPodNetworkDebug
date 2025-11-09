@@ -891,13 +891,7 @@ if [ -n "$POD_DIR" ] && [ -s "$POD_DIR/pod_full.json" ]; then
     fi
   fi
   
-  # Check NetworkPolicies and node SG
-  if [ -s "$NODE_DIR/node_k8s_networkpolicies.json" ]; then
-    NP_COUNT=$(jq -r 'length' "$NODE_DIR/node_k8s_networkpolicies.json" 2>/dev/null | tr -d '[:space:]' || echo "0")
-    if [ "$NP_COUNT" != "0" ] && [ "$NP_COUNT" -gt 0 ]; then
-      say "[INFO] Found $NP_COUNT NetworkPolicy(ies) - verify they allow ingress from node for health probes"
-    fi
-  fi
+  # NetworkPolicy analysis will be in a separate section
   
   if [ -n "$AWS_DIR" ] && [ -s "$AWS_DIR/all_instance_enis.json" ]; then
     NODE_SGS=$(jq -r '.[0]?.Groups[]?.GroupId // empty' "$AWS_DIR/all_instance_enis.json" 2>/dev/null | grep -v "^$" | head -3 | tr '\n' ',' | sed 's/,$//' || echo "")
@@ -1062,6 +1056,43 @@ if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_routes_all.txt" ]; then
   fi
   
   say "  - Full route table: \`node_*/node_routes_all.txt\`"
+fi
+
+# NetworkPolicy analysis
+if [ -n "$POD_DIR" ] && [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_k8s_networkpolicies.json" ]; then
+  echo >> "$REPORT"
+  say "[INFO] NetworkPolicy analysis:"
+  
+  NP_FILE="$NODE_DIR/node_k8s_networkpolicies.json"
+  POD_NAMESPACE=$(jq -r '.metadata.namespace // "default"' "$POD_DIR/pod_full.json" 2>/dev/null || echo "default")
+  POD_LABELS=$(jq -r '.metadata.labels // {}' "$POD_DIR/pod_full.json" 2>/dev/null || echo "{}")
+  
+  NP_COUNT=$(jq -r '.items | length' "$NP_FILE" 2>/dev/null | tr -d '[:space:]' || echo "0")
+  
+  if [ "$NP_COUNT" = "0" ] || [ -z "$NP_COUNT" ]; then
+    say "[OK] No NetworkPolicies found in cluster"
+  else
+    say "[INFO] Found $NP_COUNT NetworkPolicy(ies) in cluster"
+    
+    # Count applicable policies (simplified check)
+    APPLICABLE_COUNT=0
+    NP_INDEX=0
+    while [ "$NP_INDEX" -lt "$NP_COUNT" ]; do
+      NP_NAMESPACE=$(jq -r --argjson idx "$NP_INDEX" '.items[$idx].metadata.namespace // "default"' "$NP_FILE" 2>/dev/null || echo "default")
+      if [ "$NP_NAMESPACE" = "$POD_NAMESPACE" ]; then
+        APPLICABLE_COUNT=$((APPLICABLE_COUNT + 1))
+      fi
+      NP_INDEX=$((NP_INDEX + 1))
+    done
+    
+    if [ "$APPLICABLE_COUNT" -gt 0 ]; then
+      say "[INFO] Found $APPLICABLE_COUNT NetworkPolicy(ies) in namespace '$POD_NAMESPACE' (may apply to this pod)"
+      say "  - Full analysis in connectivity analysis output"
+      say "  - NetworkPolicies: \`node_*/node_k8s_networkpolicies.json\`"
+    else
+      say "[OK] No NetworkPolicies in namespace '$POD_NAMESPACE'"
+    fi
+  fi
 fi
 
 # iptables rules summary

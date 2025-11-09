@@ -17,6 +17,7 @@ This toolkit collects comprehensive diagnostics for AWS EKS pods using Security 
 - **ENI/Instance Limits**: Checks instance type ENI and IP limits, compares current usage vs limits, validates trunk ENI branch ENI count, and estimates max pods capacity
 - **Route Table Drift Analysis**: Detects missing or incorrect routes (default route, subnet routes, metadata service route), validates route consistency, and identifies routing issues
 - **Health Probe Analysis**: Analyzes health probe configurations (liveness, readiness, startup), verifies probe ports are listening, checks for probe failures, and validates network access from kubelet
+- **NetworkPolicy Analysis**: Analyzes NetworkPolicies to detect if they block DNS, health probes, metrics, or service traffic, validates podSelector matches, and checks for missing egress rules
 - **Connectivity Analysis**: Advanced analysis for pod connectivity issues after large churns, including ENI attachment timing, subnet IP availability, CNI log errors, and SYN_SENT connection detection (identifies pods trying to connect but waiting for ACK)
 - **AWS ENI State**: Captures trunk and branch ENI information, subnet IP availability, and instance type details
 - **API Diagnostics**: Analyzes CloudTrail events for ENI-related throttles and errors (with dry-run detection)
@@ -38,6 +39,7 @@ Detailed documentation for each diagnostic check is available in the [`doc/`](do
 - [ENI/Instance Limits](doc/04-eni-instance-limits.md)
 - [Route Table Drift](doc/17-route-table-drift.md)
 - [Health Probes](doc/18-health-probes.md)
+- [Network Policies](doc/19-network-policies.md)
 - [Security Group Validation](doc/05-security-group-validation.md)
 - [Network Namespace Leaks](doc/06-network-namespace-leaks.md)
 - [DNS Resolution](doc/08-dns-resolution.md)
@@ -311,6 +313,12 @@ Generates a markdown report from the collected bundle.
   - Checks pod Ready and ContainersReady conditions
   - Searches pod events for probe failures
   - Validates NetworkPolicies and node Security Groups allow probe traffic
+- **NetworkPolicies**:
+  - Finds NetworkPolicies that apply to the pod (namespace and podSelector matching)
+  - Checks if ingress rules allow health probes from nodes
+  - Validates DNS egress rules (port 53)
+  - Checks for metrics egress rules
+  - Warns about restrictive policies that may block required traffic
 - **ENI/Instance Limits**:
   - Shows instance type and ENI/IP limits
   - Compares current ENI usage vs instance limits
@@ -337,6 +345,7 @@ Advanced analysis for diagnosing pod connectivity issues, especially after large
 - Analyzes ENI attachment state and timing
 - **Route Table Drift Analysis**: Validates default route, subnet routes, metadata service route, and route consistency
 - **Health Probe Analysis**: Analyzes probe configurations, verifies probe ports are listening, checks for probe failures, and validates network access
+- **NetworkPolicy Analysis**: Analyzes NetworkPolicies to detect if they block DNS, health probes, metrics, or service traffic
 - **ENI/Instance Limits Analysis**: Checks instance type ENI/IP limits, current usage, trunk ENI branch ENI count, and estimates max pods
 - Checks IPAMD state and branch ENI limits
 - Validates subnet IP availability

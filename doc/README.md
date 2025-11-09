@@ -22,6 +22,7 @@ This directory contains detailed documentation for each diagnostic check perform
 16. **[Network Interface States](16-network-interface-states.md)** - Validates interface states
 17. **[Route Table Drift](17-route-table-drift.md)** - Detects missing or incorrect routes
 18. **[Health Probes](18-health-probes.md)** - Analyzes health probe configuration and failures
+19. **[Network Policies](19-network-policies.md)** - Analyzes NetworkPolicy rules and potential traffic blocks
 
 ## Document Structure
 
