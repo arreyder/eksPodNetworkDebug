@@ -631,6 +631,24 @@ if command -v kubectl >/dev/null 2>&1; then
   log "Collected DNS service and CoreDNS/NodeLocal DNSCache information"
 fi
 
+# Collect pods in Pending state (for IP exhaustion analysis)
+log "Collecting pods in Pending state..."
+if command -v kubectl >/dev/null 2>&1; then
+  # Get all pods in Pending state (all namespaces, on this node)
+  # Use the NODE variable passed to the script
+  if [ -n "$NODE" ]; then
+    # Get pending pods on this node
+    kubectl get pods --all-namespaces --field-selector spec.nodeName="$NODE",status.phase=Pending -o json > "$OUT/node_pending_pods.json" 2>/dev/null || echo '{"items":[]}' > "$OUT/node_pending_pods.json"
+    PENDING_COUNT=$(jq -r '.items | length' "$OUT/node_pending_pods.json" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    log "Found $PENDING_COUNT pending pod(s) on this node"
+  else
+    # Fallback: get all pending pods (not node-specific)
+    kubectl get pods --all-namespaces --field-selector status.phase=Pending -o json > "$OUT/node_pending_pods.json" 2>/dev/null || echo '{"items":[]}' > "$OUT/node_pending_pods.json"
+    PENDING_COUNT=$(jq -r '.items | length' "$OUT/node_pending_pods.json" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    log "Found $PENDING_COUNT pending pod(s) (all nodes)"
+  fi
+fi
+
 # Resource exhaustion checks
 log "Checking for resource exhaustion..."
 # File descriptors

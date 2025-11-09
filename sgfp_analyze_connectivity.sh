@@ -284,7 +284,9 @@ if [ -n "$AWS_DIR" ] && [ -s "$AWS_DIR/trunk_eni.json" ]; then
 fi
 
 echo ""
-echo "=== Subnet IP Availability ==="
+echo "=== Subnet IP Availability / IP Exhaustion Analysis ==="
+
+IP_EXHAUSTION_ISSUES=0
 
 # Check subnet IP availability
 if [ -n "$AWS_DIR" ] && [ -s "$AWS_DIR/subnets.json" ]; then
@@ -293,9 +295,95 @@ if [ -n "$AWS_DIR" ] && [ -s "$AWS_DIR/subnets.json" ]; then
     echo "[ISSUE] Subnets with low IP availability (<10 IPs):"
     echo "$LOW_IP_SUBNETS" | sed 's/^/  - /'
     issues=$((issues+1))
+    IP_EXHAUSTION_ISSUES=1
   else
     echo "[OK] All subnets have adequate IP availability"
   fi
+fi
+
+# Check for pods stuck in Pending state
+if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_pending_pods.json" ]; then
+  PENDING_COUNT=$(jq -r '.items | length' "$NODE_DIR/node_pending_pods.json" 2>/dev/null | tr -d '[:space:]' || echo "0")
+  if [ "$PENDING_COUNT" != "0" ] && [ "$PENDING_COUNT" -gt 0 ]; then
+    echo "[INFO] Found $PENDING_COUNT pod(s) in Pending state"
+    
+    # Check pending pods for IP-related reasons
+    PENDING_IP_RELATED=0
+    PENDING_PODS_LIST=""
+    NP_INDEX=0
+    while [ "$NP_INDEX" -lt "$PENDING_COUNT" ]; do
+      POD_NAME=$(jq -r --argjson idx "$NP_INDEX" '.items[$idx].metadata.name // "unknown"' "$NODE_DIR/node_pending_pods.json" 2>/dev/null || echo "unknown")
+      POD_NS=$(jq -r --argjson idx "$NP_INDEX" '.items[$idx].metadata.namespace // "default"' "$NODE_DIR/node_pending_pods.json" 2>/dev/null || echo "default")
+      POD_UID=$(jq -r --argjson idx "$NP_INDEX" '.items[$idx].metadata.uid // ""' "$NODE_DIR/node_pending_pods.json" 2>/dev/null || echo "")
+      
+      # Check pod conditions for IP-related reasons
+      POD_CONDITIONS=$(jq -r --argjson idx "$NP_INDEX" '.items[$idx].status.conditions // []' "$NODE_DIR/node_pending_pods.json" 2>/dev/null || echo "[]")
+      POD_SCHEDULED=$(echo "$POD_CONDITIONS" | jq -r '.[]? | select(.type == "PodScheduled") | .reason // ""' 2>/dev/null || echo "")
+      POD_INITIALIZED=$(echo "$POD_CONDITIONS" | jq -r '.[]? | select(.type == "Initialized") | .reason // ""' 2>/dev/null || echo "")
+      
+      # Check for IP-related pending reasons
+      if echo "$POD_SCHEDULED" | grep -qiE "(insufficient|ip|eni|network|resource)" || \
+         echo "$POD_INITIALIZED" | grep -qiE "(ip|eni|network|resource)"; then
+        PENDING_IP_RELATED=$((PENDING_IP_RELATED + 1))
+        if [ -z "$PENDING_PODS_LIST" ]; then
+          PENDING_PODS_LIST="$POD_NS/$POD_NAME"
+        else
+          PENDING_PODS_LIST="$PENDING_PODS_LIST, $POD_NS/$POD_NAME"
+        fi
+      fi
+      
+      NP_INDEX=$((NP_INDEX + 1))
+    done
+    
+    if [ "$PENDING_IP_RELATED" -gt 0 ]; then
+      echo "[ISSUE] Found $PENDING_IP_RELATED pod(s) in Pending state with IP-related reasons: $PENDING_PODS_LIST"
+      issues=$((issues+1))
+      IP_EXHAUSTION_ISSUES=1
+    elif [ "$PENDING_COUNT" -gt 5 ]; then
+      # If many pending pods, warn even if not explicitly IP-related
+      echo "[WARN] Found $PENDING_COUNT pod(s) in Pending state (may indicate IP exhaustion or other resource issues)"
+      warnings=$((warnings+1))
+      IP_EXHAUSTION_ISSUES=1
+    fi
+  fi
+fi
+
+# Check CNI logs for IP allocation failures
+if [ -n "$NODE_DIR" ] && [ -d "$NODE_DIR/cni_logs" ]; then
+  IP_ALLOCATION_ERRORS=0
+  
+  # Check ipamd.log for IP allocation errors
+  if [ -s "$NODE_DIR/cni_logs/ipamd.log" ]; then
+    IPAMD_IP_ERRORS=$(grep -iE "(unable.*allocate|failed.*allocate|no.*ip.*available|ip.*exhaust|insufficient.*ip|cannot.*allocate.*ip|allocation.*failed)" "$NODE_DIR/cni_logs/ipamd.log" 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+    if [ "$IPAMD_IP_ERRORS" != "0" ] && [ "$IPAMD_IP_ERRORS" -gt 0 ]; then
+      IP_ALLOCATION_ERRORS=$((IP_ALLOCATION_ERRORS + IPAMD_IP_ERRORS))
+      echo "[ISSUE] Found $IPAMD_IP_ERRORS IP allocation error(s) in ipamd.log"
+      grep -iE "(unable.*allocate|failed.*allocate|no.*ip.*available|ip.*exhaust|insufficient.*ip|cannot.*allocate.*ip|allocation.*failed)" "$NODE_DIR/cni_logs/ipamd.log" 2>/dev/null | head -5 | sed 's/^/  - /'
+      issues=$((issues+1))
+      IP_EXHAUSTION_ISSUES=1
+    fi
+  fi
+  
+  # Check plugin.log for IP allocation errors
+  if [ -s "$NODE_DIR/cni_logs/plugin.log" ]; then
+    PLUGIN_IP_ERRORS=$(grep -iE "(unable.*allocate|failed.*allocate|no.*ip.*available|ip.*exhaust|insufficient.*ip|cannot.*allocate.*ip|allocation.*failed|failed.*get.*ip)" "$NODE_DIR/cni_logs/plugin.log" 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+    if [ "$PLUGIN_IP_ERRORS" != "0" ] && [ "$PLUGIN_IP_ERRORS" -gt 0 ]; then
+      IP_ALLOCATION_ERRORS=$((IP_ALLOCATION_ERRORS + PLUGIN_IP_ERRORS))
+      echo "[ISSUE] Found $PLUGIN_IP_ERRORS IP allocation error(s) in plugin.log"
+      grep -iE "(unable.*allocate|failed.*allocate|no.*ip.*available|ip.*exhaust|insufficient.*ip|cannot.*allocate.*ip|allocation.*failed|failed.*get.*ip)" "$NODE_DIR/cni_logs/plugin.log" 2>/dev/null | head -5 | sed 's/^/  - /'
+      issues=$((issues+1))
+      IP_EXHAUSTION_ISSUES=1
+    fi
+  fi
+  
+  if [ "$IP_ALLOCATION_ERRORS" -eq 0 ]; then
+    echo "[OK] No IP allocation errors found in CNI logs"
+  fi
+fi
+
+# Correlate: if low IPs AND pending pods AND IP errors, this is likely IP exhaustion
+if [ "$IP_EXHAUSTION_ISSUES" -eq 1 ]; then
+  echo "[INFO] Recommendation: Check subnet IP availability, consider enlarging subnets, using prefix delegation, or reducing warm IP pool size"
 fi
 
 echo ""

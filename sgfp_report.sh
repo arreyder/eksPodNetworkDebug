@@ -1434,6 +1434,71 @@ else
   say "[INFO] No branch ENIs found in VPC scan (or insufficient perms)"
 fi
 
+# Subnet IP Availability / IP Exhaustion
+if [ -n "$AWS_DIR" ] && [ -s "$AWS_DIR/subnets.json" ]; then
+  echo >> "$REPORT"
+  echo "## Subnet IP Availability / IP Exhaustion" >> "$REPORT"
+  
+  LOW_IP_SUBNETS=$(jq -r '.[] | select(.[1] < 10) | "\(.[0]): \(.[1]) IPs available (CIDR: \(.[2]))"' "$AWS_DIR/subnets.json" 2>/dev/null || true)
+  if [ -n "$LOW_IP_SUBNETS" ]; then
+    say "[ISSUE] Subnets with low IP availability (<10 IPs):"
+    echo "$LOW_IP_SUBNETS" | while IFS= read -r line; do
+      say "  - $line"
+    done
+  else
+    say "[OK] All subnets have adequate IP availability"
+  fi
+  
+  # Check for pending pods
+  if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_pending_pods.json" ]; then
+    PENDING_COUNT=$(jq -r '.items | length' "$NODE_DIR/node_pending_pods.json" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    if [ "$PENDING_COUNT" != "0" ] && [ "$PENDING_COUNT" -gt 0 ]; then
+      PENDING_IP_RELATED=0
+      NP_INDEX=0
+      while [ "$NP_INDEX" -lt "$PENDING_COUNT" ]; do
+        POD_CONDITIONS=$(jq -r --argjson idx "$NP_INDEX" '.items[$idx].status.conditions // []' "$NODE_DIR/node_pending_pods.json" 2>/dev/null || echo "[]")
+        POD_SCHEDULED=$(echo "$POD_CONDITIONS" | jq -r '.[]? | select(.type == "PodScheduled") | .reason // ""' 2>/dev/null || echo "")
+        POD_INITIALIZED=$(echo "$POD_CONDITIONS" | jq -r '.[]? | select(.type == "Initialized") | .reason // ""' 2>/dev/null || echo "")
+        if echo "$POD_SCHEDULED" | grep -qiE "(insufficient|ip|eni|network|resource)" || \
+           echo "$POD_INITIALIZED" | grep -qiE "(ip|eni|network|resource)"; then
+          PENDING_IP_RELATED=$((PENDING_IP_RELATED + 1))
+        fi
+        NP_INDEX=$((NP_INDEX + 1))
+      done
+      
+      if [ "$PENDING_IP_RELATED" -gt 0 ]; then
+        say "[ISSUE] Found $PENDING_IP_RELATED pod(s) in Pending state with IP-related reasons"
+      elif [ "$PENDING_COUNT" -gt 5 ]; then
+        say "[WARN] Found $PENDING_COUNT pod(s) in Pending state (may indicate IP exhaustion)"
+      else
+        say "[INFO] Found $PENDING_COUNT pod(s) in Pending state"
+      fi
+    fi
+  fi
+  
+  # Check CNI logs for IP allocation errors
+  if [ -n "$NODE_DIR" ] && [ -d "$NODE_DIR/cni_logs" ]; then
+    IP_ALLOCATION_ERRORS=0
+    if [ -s "$NODE_DIR/cni_logs/ipamd.log" ]; then
+      IPAMD_IP_ERRORS=$(grep -iE "(unable.*allocate|failed.*allocate|no.*ip.*available|ip.*exhaust|insufficient.*ip|cannot.*allocate.*ip|allocation.*failed)" "$NODE_DIR/cni_logs/ipamd.log" 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+      if [ "$IPAMD_IP_ERRORS" != "0" ] && [ "$IPAMD_IP_ERRORS" -gt 0 ]; then
+        IP_ALLOCATION_ERRORS=$((IP_ALLOCATION_ERRORS + IPAMD_IP_ERRORS))
+        say "[ISSUE] Found $IPAMD_IP_ERRORS IP allocation error(s) in ipamd.log"
+      fi
+    fi
+    if [ -s "$NODE_DIR/cni_logs/plugin.log" ]; then
+      PLUGIN_IP_ERRORS=$(grep -iE "(unable.*allocate|failed.*allocate|no.*ip.*available|ip.*exhaust|insufficient.*ip|cannot.*allocate.*ip|allocation.*failed|failed.*get.*ip)" "$NODE_DIR/cni_logs/plugin.log" 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+      if [ "$PLUGIN_IP_ERRORS" != "0" ] && [ "$PLUGIN_IP_ERRORS" -gt 0 ]; then
+        IP_ALLOCATION_ERRORS=$((IP_ALLOCATION_ERRORS + PLUGIN_IP_ERRORS))
+        say "[ISSUE] Found $PLUGIN_IP_ERRORS IP allocation error(s) in plugin.log"
+      fi
+    fi
+    if [ "$IP_ALLOCATION_ERRORS" -eq 0 ]; then
+      say "[OK] No IP allocation errors found in CNI logs"
+    fi
+  fi
+fi
+
 # ENI / Instance Limits
 if [ -n "$AWS_DIR" ]; then
   echo >> "$REPORT"

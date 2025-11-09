@@ -9,6 +9,9 @@ The toolkit validates subnet IP address availability to prevent pod scheduling f
 - Identifies subnets with low IP availability (<10 IPs)
 - Reports subnet CIDR blocks and availability zones
 - Warns when subnets are approaching exhaustion
+- Checks for pods stuck in Pending state (may indicate IP exhaustion)
+- Analyzes CNI logs for IP allocation failures
+- Correlates pending pods with IP-related reasons
 
 ## Why It Matters
 

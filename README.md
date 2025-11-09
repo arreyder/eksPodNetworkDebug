@@ -169,6 +169,7 @@ sgfp_bundle_<pod>_<timestamp>/
     node_dns_endpoints.json                # DNS service endpoints
     node_nodelocal_dns_service.json        # NodeLocal DNSCache service (if enabled)
     node_coredns_config.json               # CoreDNS configuration
+    node_pending_pods.json                 # Pods in Pending state (for IP exhaustion analysis)
     node_file_descriptors.txt              # File descriptor usage
     node_memory_info.txt                   # Memory information
     node_k8s_networkpolicies.json          # Kubernetes NetworkPolicies
