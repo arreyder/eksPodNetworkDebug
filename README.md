@@ -10,9 +10,13 @@ This toolkit collects comprehensive diagnostics for AWS EKS pods using Security 
 - **SG Details**: Shows Security Group IDs, names, and descriptions for easy identification
 - **Node Diagnostics**: Collects conntrack usage, interface error statistics, socket overruns, and AWS VPC CNI logs (automatically via temporary debug pod)
 - **CNI Log Analysis**: Automatically collects and analyzes CNI logs from `/var/log/aws-routed-eni/` including ipamd, plugin, network-policy-agent, and eBPF SDK logs
-- **iptables Rule Analysis**: Collects and analyzes iptables rules (filter and NAT tables), including pod-specific rule detection
+- **iptables Rule Analysis**: Collects and analyzes iptables rules (filter and NAT tables), including pod-specific rule detection and kube-proxy mode validation (iptables vs IPVS)
+- **kube-proxy Analysis**: Validates kube-proxy iptables chains (KUBE-SERVICES, KUBE-NODEPORTS, KUBE-MARK-MASQ), checks masquerade rules, and verifies service rules for pods
+- **MTU Configuration Analysis**: Detects MTU mismatches between pod and node interfaces, identifies fragmentation issues, and checks for multiple MTU values on non-loopback interfaces
+- **Reverse Path Filtering (rp_filter)**: Validates rp_filter settings for pod ENI scenarios, recommends loose mode (rp_filter=2) for asymmetric routing support, and flags security risks
+- **ENI/Instance Limits**: Checks instance type ENI and IP limits, compares current usage vs limits, validates trunk ENI branch ENI count, and estimates max pods capacity
 - **Connectivity Analysis**: Advanced analysis for pod connectivity issues after large churns, including ENI attachment timing, subnet IP availability, CNI log errors, and SYN_SENT connection detection (identifies pods trying to connect but waiting for ACK)
-- **AWS ENI State**: Captures trunk and branch ENI information, subnet IP availability
+- **AWS ENI State**: Captures trunk and branch ENI information, subnet IP availability, and instance type details
 - **API Diagnostics**: Analyzes CloudTrail events for ENI-related throttles and errors (with dry-run detection)
 - **Quick Status Check**: Fast validation script to check pod ENI status without full collection (includes optional network connections display with SYN_SENT detection)
 - **Log Files Summary**: Report includes concise summary of all log files with error counts and file paths
@@ -20,6 +24,25 @@ This toolkit collects comprehensive diagnostics for AWS EKS pods using Security 
 - **Node Debug Pod**: Helper script to create debug pods on nodes (supports pod name or node name)
 - **All-in-One Doctor Script**: Single command to collect, analyze, and report
 - **Consistent Output Format**: Uses `[PREFIX]` format for clear, parseable output
+
+## Documentation
+
+Detailed documentation for each diagnostic check is available in the [`doc/`](doc/) directory. See the [documentation index](doc/README.md) for a complete list of all checks.
+
+**Key checks:**
+- [MTU Configuration Analysis](doc/01-mtu-configuration.md)
+- [kube-proxy iptables Analysis](doc/02-kube-proxy-iptables.md)
+- [Reverse Path Filtering (rp_filter)](doc/03-reverse-path-filtering.md)
+- [ENI/Instance Limits](doc/04-eni-instance-limits.md)
+- [Security Group Validation](doc/05-security-group-validation.md)
+- [Network Namespace Leaks](doc/06-network-namespace-leaks.md)
+- [DNS Resolution](doc/08-dns-resolution.md)
+- [SYN_SENT Detection](doc/10-syn-sent-detection.md)
+- [CNI Logs Analysis](doc/11-cni-logs-analysis.md)
+- [Subnet IP Availability](doc/12-subnet-ip-availability.md)
+- And more... (see [doc/README.md](doc/README.md) for full list)
+
+Each document explains what we check, why it matters, how we check it, and recommended actions when issues are found.
 
 ## Requirements
 
@@ -144,6 +167,7 @@ sgfp_bundle_<pod>_<timestamp>/
     node_routes_all.txt                    # Route table (all tables)
     node_veth_interfaces.txt               # veth interfaces
     node_syslog_network.txt                # Network-related syslog entries
+    node_rp_filter.txt                     # Reverse path filtering (rp_filter) settings per interface
     cni_logs/                              # AWS VPC CNI logs
       ipamd.log
       plugin.log
@@ -155,6 +179,7 @@ sgfp_bundle_<pod>_<timestamp>/
   aws_<node>/
     vpc_id.txt
     node_instance_id.txt
+    node_instance_type.txt                # Instance type (e.g., m8gd.2xlarge)
     trunk_eni_id.txt
     trunk_eni.json
     all_instance_enis.json
@@ -253,9 +278,29 @@ Generates a markdown report from the collected bundle.
   - Connection states (ESTABLISHED, CLOSE, TIME_WAIT, etc.)
 - **iptables Rules**:
   - Shows iptables filter and NAT table summaries (chain and rule counts)
+  - **kube-proxy Mode Detection**: Identifies kube-proxy mode (iptables vs IPVS) and validates kube-proxy chains
+  - **KUBE-SERVICES Chain Validation**: Checks if kube-proxy chains are active and processing traffic
+  - **Masquerade Rules**: Validates masquerade rules are present (required for service traffic)
   - **Pod-Specific Rule Detection**: Automatically searches for iptables rules matching the pod's IP address and veth interface
   - Displays example rules when found (e.g., Kubernetes service DNAT rules)
   - Notes when no pod-specific rules are found (may be normal if no network policies apply)
+- **MTU Configuration**:
+  - Extracts MTU values from node interfaces (excluding loopback)
+  - Compares pod interface MTU with node interface MTU
+  - Warns about MTU mismatches that may cause fragmentation
+  - Checks kernel logs for fragmentation-related messages
+  - Reports standard (1500) or jumbo (9001) frame configuration
+- **Reverse Path Filtering (rp_filter)**:
+  - Collects rp_filter settings for all interfaces
+  - For pod ENI scenarios, recommends rp_filter=2 (loose mode) to allow asymmetric routing
+  - Flags rp_filter=1 (strict mode) as a potential issue for pod ENI
+  - Warns about rp_filter=0 (disabled) as a security risk
+- **ENI/Instance Limits**:
+  - Shows instance type and ENI/IP limits
+  - Compares current ENI usage vs instance limits
+  - Validates trunk ENI branch ENI count (approaching 50 limit)
+  - Estimates max pods capacity (without trunking)
+  - Warns when approaching or at limits
 - **Log Files Summary**: Concise list of all log files with error counts and file paths
 - **Node CNI Logs**: Shows CNI log errors with recent examples in the Node State section
 - **View Related Logs**: Provides helper script commands to view pod-specific log lines
@@ -274,6 +319,7 @@ Advanced analysis for diagnosing pod connectivity issues, especially after large
 
 **Features:**
 - Analyzes ENI attachment state and timing
+- **ENI/Instance Limits Analysis**: Checks instance type ENI/IP limits, current usage, trunk ENI branch ENI count, and estimates max pods
 - Checks IPAMD state and branch ENI limits
 - Validates subnet IP availability
 - Analyzes pod events for network-related issues
@@ -285,6 +331,9 @@ Advanced analysis for diagnosing pod connectivity issues, especially after large
 - Tests DNS resolution
 - Checks for resource exhaustion (file descriptors, memory pressure)
 - Validates network interface states
+- **MTU Configuration Analysis**: Detects MTU mismatches, fragmentation issues, and validates MTU consistency
+- **kube-proxy iptables Analysis**: Validates kube-proxy mode, chain activity, and masquerade rules
+- **Reverse Path Filtering (rp_filter) Analysis**: Validates rp_filter settings for pod ENI scenarios and flags security risks
 
 ### `sgfp_node_debug.sh` - Node Debug Pod
 Creates a debug pod on a node for interactive troubleshooting.

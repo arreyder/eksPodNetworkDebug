@@ -1160,6 +1160,101 @@ else
   say "[INFO] No branch ENIs found in VPC scan (or insufficient perms)"
 fi
 
+# ENI / Instance Limits
+if [ -n "$AWS_DIR" ]; then
+  echo >> "$REPORT"
+  echo "## ENI / Instance Limits" >> "$REPORT"
+  
+  INSTANCE_TYPE_FILE="$AWS_DIR/node_instance_type.txt"
+  INSTANCE_ENIS_FILE="$AWS_DIR/all_instance_enis.json"
+  TRUNK_ENI_FILE="$AWS_DIR/trunk_eni_id.txt"
+  BRANCH_ENIS_FILE="$AWS_DIR/_all_branch_enis_in_vpc.json"
+  
+  # Function to get ENI/IP limits (same as in analyze_connectivity.sh)
+  get_instance_limits() {
+    local instance_type="$1"
+    case "$instance_type" in
+      t3.nano|t3.micro|t3.small|t3.medium|t4g.nano|t4g.micro|t4g.small|t4g.medium)
+        echo "3 4" ;;
+      t3.large|t3.xlarge|t4g.large|t4g.xlarge|m5.large|m5.xlarge|m5d.large|m5d.xlarge|c5.large|c5.xlarge|c5d.large|c5d.xlarge|r5.large|r5.xlarge|r5d.large|r5d.xlarge|m6i.large|m6i.xlarge|c6i.large|c6i.xlarge|r6i.large|r6i.xlarge)
+        echo "3 10" ;;
+      t3.2xlarge|t4g.2xlarge|m5.2xlarge|m5.4xlarge|m5d.2xlarge|m5d.4xlarge|c5.2xlarge|c5.4xlarge|c5d.2xlarge|c5d.4xlarge|r5.2xlarge|r5.4xlarge|r5d.2xlarge|r5d.4xlarge|m6i.2xlarge|m6i.4xlarge|c6i.2xlarge|c6i.4xlarge|r6i.2xlarge|r6i.4xlarge|m7i.2xlarge|m7i.4xlarge|c7i.2xlarge|c7i.4xlarge|r7i.2xlarge|r7i.4xlarge)
+        echo "4 15" ;;
+      m6g.2xlarge|m6g.4xlarge|c6g.2xlarge|c6g.4xlarge|r6g.2xlarge|r6g.4xlarge|m7g.2xlarge|m7g.4xlarge|c7g.2xlarge|c7g.4xlarge|r7g.2xlarge|r7g.4xlarge|m8g.2xlarge|m8g.4xlarge|c8g.2xlarge|c8g.4xlarge|r8g.2xlarge|r8g.4xlarge)
+        echo "4 15" ;;
+      m6gd.2xlarge|m6gd.4xlarge|c6gd.2xlarge|c6gd.4xlarge|r6gd.2xlarge|r6gd.4xlarge|m7gd.2xlarge|m7gd.4xlarge|c7gd.2xlarge|c7gd.4xlarge|r7gd.2xlarge|r7gd.4xlarge|m8gd.2xlarge|m8gd.4xlarge|c8gd.2xlarge|c8gd.4xlarge|r8gd.2xlarge|r8gd.4xlarge)
+        echo "4 15" ;;
+      m5.8xlarge|m5.12xlarge|m5.16xlarge|m5.24xlarge|m5d.8xlarge|m5d.12xlarge|m5d.16xlarge|m5d.24xlarge|c5.9xlarge|c5.12xlarge|c5.18xlarge|c5.24xlarge|c5d.9xlarge|c5d.12xlarge|c5d.18xlarge|c5d.24xlarge|r5.8xlarge|r5.12xlarge|r5.16xlarge|r5.24xlarge|r5d.8xlarge|r5d.12xlarge|r5d.16xlarge|r5d.24xlarge|m6i.8xlarge|m6i.12xlarge|m6i.16xlarge|m6i.24xlarge|m6i.32xlarge|c6i.8xlarge|c6i.12xlarge|c6i.16xlarge|c6i.24xlarge|c6i.32xlarge|r6i.8xlarge|r6i.12xlarge|r6i.16xlarge|r6i.24xlarge|r6i.32xlarge|m7i.8xlarge|m7i.12xlarge|m7i.16xlarge|m7i.24xlarge|m7i.32xlarge|c7i.8xlarge|c7i.12xlarge|c7i.16xlarge|c7i.24xlarge|c7i.32xlarge|r7i.8xlarge|r7i.12xlarge|r7i.16xlarge|r7i.24xlarge|r7i.32xlarge)
+        echo "8 30" ;;
+      m6g.8xlarge|m6g.12xlarge|m6g.16xlarge|m6g.metal|c6g.8xlarge|c6g.12xlarge|c6g.16xlarge|c6g.metal|r6g.8xlarge|r6g.12xlarge|r6g.16xlarge|r6g.metal|m7g.8xlarge|m7g.12xlarge|m7g.16xlarge|m7g.metal|c7g.8xlarge|c7g.12xlarge|c7g.16xlarge|c7g.metal|r7g.8xlarge|r7g.12xlarge|r7g.16xlarge|r7g.metal|m8g.8xlarge|m8g.12xlarge|m8g.16xlarge|m8g.metal|c8g.8xlarge|c8g.12xlarge|c8g.16xlarge|c8g.metal|r8g.8xlarge|r8g.12xlarge|r8g.16xlarge|r8g.metal)
+        echo "8 30" ;;
+      m6gd.8xlarge|m6gd.12xlarge|m6gd.16xlarge|m6gd.metal|c6gd.8xlarge|c6gd.12xlarge|c6gd.16xlarge|c6gd.metal|r6gd.8xlarge|r6gd.12xlarge|r6gd.16xlarge|r6gd.metal|m7gd.8xlarge|m7gd.12xlarge|m7gd.16xlarge|m7gd.metal|c7gd.8xlarge|c7gd.12xlarge|c7gd.16xlarge|c7gd.metal|r7gd.8xlarge|r7gd.12xlarge|r7gd.16xlarge|r7gd.metal|m8gd.8xlarge|m8gd.12xlarge|m8gd.16xlarge|m8gd.metal|c8gd.8xlarge|c8gd.12xlarge|c8gd.16xlarge|c8gd.metal|r8gd.8xlarge|r8gd.12xlarge|r8gd.16xlarge|r8gd.metal)
+        echo "8 30" ;;
+      m5.metal|m5d.metal|c5.metal|c5d.metal|r5.metal|r5d.metal|m6i.metal|c6i.metal|r6i.metal|m7i.metal|c7i.metal|r7i.metal)
+        echo "15 50" ;;
+      *)
+        echo "4 10" ;;
+    esac
+  }
+  
+  if [ -s "$INSTANCE_TYPE_FILE" ]; then
+    INSTANCE_TYPE=$(cat "$INSTANCE_TYPE_FILE" 2>/dev/null | tr -d '[:space:]' || echo "unknown")
+    
+    if [ "$INSTANCE_TYPE" != "unknown" ] && [ -n "$INSTANCE_TYPE" ]; then
+      LIMITS=$(get_instance_limits "$INSTANCE_TYPE")
+      MAX_ENIS=$(echo "$LIMITS" | awk '{print $1}')
+      MAX_IPS_PER_ENI=$(echo "$LIMITS" | awk '{print $2}')
+      
+      if [ -n "$MAX_ENIS" ] && [ "$MAX_ENIS" != "0" ]; then
+        say "[INFO] Instance type: $INSTANCE_TYPE"
+        say "[INFO] Instance limits: $MAX_ENIS ENI(s), $MAX_IPS_PER_ENI IP(s) per ENI"
+        
+        if [ -s "$INSTANCE_ENIS_FILE" ]; then
+          CURRENT_ENIS=$(jq -r 'length' "$INSTANCE_ENIS_FILE" 2>/dev/null | tr -d '[:space:]' || echo "0")
+          say "[INFO] Current ENIs on instance: $CURRENT_ENIS / $MAX_ENIS"
+          
+          if [ "$CURRENT_ENIS" -ge "$MAX_ENIS" ]; then
+            say "[ISSUE] Instance at ENI limit: $CURRENT_ENIS / $MAX_ENIS - cannot attach more ENIs"
+          elif [ "$CURRENT_ENIS" -ge $((MAX_ENIS - 1)) ]; then
+            say "[WARN] Instance approaching ENI limit: $CURRENT_ENIS / $MAX_ENIS (1 remaining)"
+          elif [ "$CURRENT_ENIS" -ge $((MAX_ENIS * 80 / 100)) ]; then
+            say "[WARN] Instance ENI usage high: $CURRENT_ENIS / $MAX_ENIS (~$((CURRENT_ENIS * 100 / MAX_ENIS))%)"
+          else
+            say "[OK] Instance ENI usage: $CURRENT_ENIS / $MAX_ENIS"
+          fi
+        fi
+        
+        # Check branch ENI count if using trunking
+        if [ -s "$TRUNK_ENI_FILE" ]; then
+          TRUNK_ENI_ID=$(cat "$TRUNK_ENI_FILE" 2>/dev/null | tr -d '[:space:]' || echo "")
+          if [ -n "$TRUNK_ENI_ID" ] && [ "$TRUNK_ENI_ID" != "null" ] && [ "$TRUNK_ENI_ID" != "" ]; then
+            if [ -s "$BRANCH_ENIS_FILE" ]; then
+              BRANCH_ENIS_ON_TRUNK=$(jq -r --arg trunk "$TRUNK_ENI_ID" '[.[] | select(.Attachment == $trunk)] | length' "$BRANCH_ENIS_FILE" 2>/dev/null | tr -d '[:space:]' || echo "0")
+              MAX_BRANCH_ENIS=50
+              
+              if [ -n "$BRANCH_ENIS_ON_TRUNK" ] && [ "$BRANCH_ENIS_ON_TRUNK" != "0" ]; then
+                say "[INFO] Branch ENIs on trunk: $BRANCH_ENIS_ON_TRUNK / $MAX_BRANCH_ENIS"
+                
+                if [ "$BRANCH_ENIS_ON_TRUNK" -ge "$MAX_BRANCH_ENIS" ]; then
+                  say "[ISSUE] Trunk ENI at branch ENI limit: $BRANCH_ENIS_ON_TRUNK / $MAX_BRANCH_ENIS"
+                elif [ "$BRANCH_ENIS_ON_TRUNK" -ge 45 ]; then
+                  say "[WARN] Trunk ENI approaching branch ENI limit: $BRANCH_ENIS_ON_TRUNK / $MAX_BRANCH_ENIS"
+                else
+                  say "[OK] Trunk ENI branch ENI usage: $BRANCH_ENIS_ON_TRUNK / $MAX_BRANCH_ENIS"
+                fi
+              fi
+            fi
+          fi
+        fi
+        
+        # Calculate max pods
+        MAX_PODS=$((MAX_ENIS * (MAX_IPS_PER_ENI - 1) + 2))
+        say "[INFO] Estimated max pods (without trunking): ~$MAX_PODS"
+      fi
+    fi
+  fi
+fi
+
 # Commands to view related logs
 echo >> "$REPORT"
 echo "## View Related Logs" >> "$REPORT"

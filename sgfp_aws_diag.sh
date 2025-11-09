@@ -15,22 +15,30 @@ log "Collecting AWS ENI diagnostics for node: $NODE_DNS"
 [ -n "$REGION" ] && log "Region: $REGION" || log "Region: (using default)"
 log "Output: $OUT"
 
-# Resolve instance id
+# Resolve instance id and get instance details
 if [ -n "${REGION:-}" ]; then
-  IID=$(aws ec2 describe-instances --region "$REGION" \
+  INSTANCE_DATA=$(aws ec2 describe-instances --region "$REGION" \
     --filters "Name=private-dns-name,Values=${NODE_DNS}" \
-    --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null || echo "unknown")
+    --query 'Reservations[0].Instances[0].{InstanceId:InstanceId,InstanceType:InstanceType}' \
+    --output json 2>/dev/null || echo "{}")
 else
-  IID=$(aws ec2 describe-instances \
+  INSTANCE_DATA=$(aws ec2 describe-instances \
     --filters "Name=private-dns-name,Values=${NODE_DNS}" \
-    --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null || echo "unknown")
+    --query 'Reservations[0].Instances[0].{InstanceId:InstanceId,InstanceType:InstanceType}' \
+    --output json 2>/dev/null || echo "{}")
 fi
 
+IID=$(echo "$INSTANCE_DATA" | jq -r '.InstanceId // "unknown"' 2>/dev/null || echo "unknown")
+INSTANCE_TYPE=$(echo "$INSTANCE_DATA" | jq -r '.InstanceType // "unknown"' 2>/dev/null || echo "unknown")
+
 echo "$IID" > "$OUT/node_instance_id.txt"
+echo "$INSTANCE_TYPE" > "$OUT/node_instance_type.txt"
+
 if [ "$IID" = "unknown" ]; then
   warn "Failed to resolve instance ID for node: $NODE_DNS"
 else
   log "Instance ID: $IID"
+  [ "$INSTANCE_TYPE" != "unknown" ] && log "Instance Type: $INSTANCE_TYPE"
 fi
 
 # VPC id
