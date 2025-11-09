@@ -11,23 +11,62 @@ warn() { printf "[NODE] WARN: %s\n" "$*" >&2; }
 log "Collecting node diagnostics for: $NODE"
 log "Output: $OUT"
 
+# Collect all pod IPs on this node (for connection analysis)
+log "Collecting pod IPs on node..."
+if command -v kubectl >/dev/null 2>&1; then
+  # Get all pods on this node with their IPs
+  kubectl get pods --all-namespaces -o wide --field-selector spec.nodeName="$NODE" 2>/dev/null | \
+    awk 'NR>1 {print $6}' | grep -E "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$" | sort -u > "$OUT/node_pod_ips.txt" 2>/dev/null || echo "" > "$OUT/node_pod_ips.txt"
+  POD_IP_COUNT=$(wc -l < "$OUT/node_pod_ips.txt" 2>/dev/null | tr -d '[:space:]' || echo "0")
+  if [ "$POD_IP_COUNT" -gt 0 ]; then
+    log "Found $POD_IP_COUNT pod IP(s) on node"
+  else
+    log "No pod IPs collected (may need kubectl access)"
+  fi
+else
+  echo "" > "$OUT/node_pod_ips.txt"
+  warn "kubectl not available, cannot collect pod IPs on node"
+fi
+
 # Conntrack usage + hints
 log "Checking conntrack usage..."
+CONNTRACK_COLLECTED=0
 CONNTRACK_DATA=""
-  if [ -r /proc/sys/net/netfilter/nf_conntrack_count ] && [ -r /proc/sys/net/netfilter/nf_conntrack_max ]; then
-    COUNT=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo 0)
-    MAX=$(cat /proc/sys/net/netfilter/nf_conntrack_max   2>/dev/null || echo 0)
+if [ -r /proc/sys/net/netfilter/nf_conntrack_count ] && [ -r /proc/sys/net/netfilter/nf_conntrack_max ]; then
+  COUNT=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo 0)
+  MAX=$(cat /proc/sys/net/netfilter/nf_conntrack_max   2>/dev/null || echo 0)
   if [ "$COUNT" != "0" ] || [ "$MAX" != "0" ]; then
     CONNTRACK_DATA="$COUNT / $MAX"
     log "Conntrack: $CONNTRACK_DATA"
     echo "$CONNTRACK_DATA" > "$OUT/node_conntrack_mtu.txt"
+    
+    # Try to collect conntrack table (if conntrack tool is available)
+    if command -v conntrack >/dev/null 2>&1; then
+      log "Collecting conntrack table..."
+      if conntrack -L -n 2>/dev/null | head -1000 > "$OUT/node_conntrack_table.txt" 2>/dev/null; then
+        CONNTRACK_COLLECTED=1
+      else
+        echo "" > "$OUT/node_conntrack_table.txt"
+      fi
+    elif [ -r /proc/net/nf_conntrack ]; then
+      log "Collecting conntrack table from /proc/net/nf_conntrack..."
+      if head -1000 /proc/net/nf_conntrack > "$OUT/node_conntrack_table.txt" 2>/dev/null; then
+        CONNTRACK_COLLECTED=1
+      else
+        echo "" > "$OUT/node_conntrack_table.txt"
+      fi
+    else
+      echo "" > "$OUT/node_conntrack_table.txt"
+    fi
   else
     warn "Conntrack data not available (not running on node or procfs not accessible)"
     echo "" > "$OUT/node_conntrack_mtu.txt"
+    echo "" > "$OUT/node_conntrack_table.txt"
   fi
 else
-  warn "Conntrack procfs not accessible (this script should run on the node for conntrack data)"
+  warn "Conntrack procfs not accessible directly, will try via temporary pod if available"
   echo "" > "$OUT/node_conntrack_mtu.txt"
+  echo "" > "$OUT/node_conntrack_table.txt"
 fi
 
 # Also capture aws-node logs (cluster scope best-effort)
@@ -187,8 +226,30 @@ if [ "$CNI_LOGS_FOUND" -eq 0 ]; then
       log "Successfully collected CNI logs via temporary debug pod"
     fi
     
-    # Use the same temporary pod for network namespace collection (before deleting it)
+    # Use the same temporary pod for network namespace and conntrack collection (before deleting it)
     TEMP_POD_AVAILABLE=1
+    
+    # Collect conntrack data via temporary pod if not already collected
+    if [ "$CONNTRACK_COLLECTED" -eq 0 ]; then
+      log "Collecting conntrack table via temporary pod..."
+      # Try conntrack command first
+      if kubectl exec "$TEMP_POD_NAME" -- sh -c "command -v conntrack >/dev/null 2>&1 && conntrack -L -n 2>/dev/null | head -1000 || cat /host/proc/net/nf_conntrack 2>/dev/null | head -1000 || true" > "$OUT/node_conntrack_table.txt" 2>/dev/null; then
+        if [ -s "$OUT/node_conntrack_table.txt" ]; then
+          CONNTRACK_COLLECTED=1
+          log "Collected conntrack table via temporary pod"
+          # Also get conntrack count/max if available
+          if kubectl exec "$TEMP_POD_NAME" -- sh -c "cat /host/proc/sys/net/netfilter/nf_conntrack_count /host/proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null | tr '\n' ' '" > "$OUT/node_conntrack_mtu.txt" 2>/dev/null; then
+            COUNT_MAX=$(cat "$OUT/node_conntrack_mtu.txt" 2>/dev/null | awk '{print $1" / "$2}' || echo "")
+            if [ -n "$COUNT_MAX" ] && [ "$COUNT_MAX" != " / " ]; then
+              echo "$COUNT_MAX" > "$OUT/node_conntrack_mtu.txt"
+              log "Conntrack: $COUNT_MAX"
+            fi
+          fi
+        else
+          echo "" > "$OUT/node_conntrack_table.txt"
+        fi
+      fi
+    fi
   else
     warn "Failed to create temporary pod for CNI log collection"
     TEMP_POD_AVAILABLE=0
@@ -285,8 +346,29 @@ for dir in $NETNS_DIRS; do
   fi
 done
 
-# If we have a temporary pod available, use it for network namespace collection
+# If we have a temporary pod available, use it for network namespace and conntrack collection
 if [ "${TEMP_POD_AVAILABLE:-0}" = "1" ] && [ -n "${TEMP_POD_NAME:-}" ] && command -v kubectl >/dev/null 2>&1; then
+  # Collect conntrack if not already collected
+  if [ "$CONNTRACK_COLLECTED" -eq 0 ]; then
+    log "Collecting conntrack table via temporary pod..."
+    if kubectl exec "$TEMP_POD_NAME" -- sh -c "command -v conntrack >/dev/null 2>&1 && conntrack -L -n 2>/dev/null | head -1000 || cat /host/proc/net/nf_conntrack 2>/dev/null | head -1000 || true" > "$OUT/node_conntrack_table.txt" 2>/dev/null; then
+      if [ -s "$OUT/node_conntrack_table.txt" ]; then
+        CONNTRACK_COLLECTED=1
+        log "Collected conntrack table via temporary pod"
+        # Also get conntrack count/max if available
+        if kubectl exec "$TEMP_POD_NAME" -- sh -c "cat /host/proc/sys/net/netfilter/nf_conntrack_count /host/proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null | tr '\n' ' '" > "$OUT/node_conntrack_mtu.txt" 2>/dev/null; then
+          COUNT_MAX=$(cat "$OUT/node_conntrack_mtu.txt" 2>/dev/null | awk '{print $1" / "$2}' || echo "")
+          if [ -n "$COUNT_MAX" ] && [ "$COUNT_MAX" != " / " ]; then
+            echo "$COUNT_MAX" > "$OUT/node_conntrack_mtu.txt"
+            log "Conntrack: $COUNT_MAX"
+          fi
+        fi
+      else
+        echo "" > "$OUT/node_conntrack_table.txt"
+      fi
+    fi
+  fi
+  
   log "Collecting network namespace details via temporary pod..."
   NETNS_JSON_TMP=$(mktemp)
   echo "[]" > "$NETNS_JSON_TMP"

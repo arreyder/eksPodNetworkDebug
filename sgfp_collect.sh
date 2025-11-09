@@ -208,6 +208,12 @@ mv "$LATEST" "$MASTER/pod_${POD}"
 
 if [ -n "$NODE_OUT" ] && [ -d "$NODE_OUT" ]; then
   mv "$NODE_OUT" "$MASTER/node_${NODE}"
+  # Collect pod IP for conntrack filtering
+  POD_IP=$(grep "^POD_IP=" "$MASTER/pod_${POD}/pod_ip.txt" 2>/dev/null | cut -d= -f2- || echo "")
+  # Filter conntrack table by pod IP if available
+  if [ -n "$POD_IP" ] && [ -s "$MASTER/node_${NODE}/node_conntrack_table.txt" ]; then
+    grep -i "$POD_IP" "$MASTER/node_${NODE}/node_conntrack_table.txt" > "$MASTER/pod_${POD}/pod_conntrack_connections.txt" 2>/dev/null || echo "" > "$MASTER/pod_${POD}/pod_conntrack_connections.txt"
+  fi
 else
   echo "WARN: Node diagnostics not found, skipping" >&2
 fi

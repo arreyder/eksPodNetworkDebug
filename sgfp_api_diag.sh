@@ -137,6 +137,9 @@ jq -r '
 
 jq -r '.[].EventName // empty' "$OUT/flat_events.json" | sort | uniq -c | sort -nr > "$OUT/top_api_calls.txt" || : > "$OUT/top_api_calls.txt"
 
+# Summary by user/caller (all events, not just errors)
+jq -r '.[]? | .User // "unknown"' "$OUT/flat_events.json" | sort | uniq -c | sort -nr > "$OUT/calls_by_user.txt" || : > "$OUT/calls_by_user.txt"
+
 # Summary
 TOT_EVENTS="$(jq -r 'length' "$OUT/events_eni.json" 2>/dev/null || echo 0)"
 TOT_FLAT="$(jq -r 'length' "$OUT/flat_events.json" 2>/dev/null || echo 0)"

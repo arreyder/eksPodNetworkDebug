@@ -92,6 +92,8 @@ sgfp_bundle_<pod>_<timestamp>/
     pod_events.txt                         # Pod events
     pod_full.json                          # Full pod JSON
     pod_container_statuses.json            # Container statuses
+    pod_connections.txt                     # Pod network connections (listening ports and established)
+    pod_conntrack_connections.txt          # Conntrack connections filtered by pod IP
     ipamd_introspection.json               # IPAMD introspection data
     ipamd_pool.json                        # IPAMD pool state
     ipamd_networkutils.json                # IPAMD network utils config
@@ -111,6 +113,8 @@ sgfp_bundle_<pod>_<timestamp>/
     aws_node_full.log
   node_<node>/
     node_conntrack_mtu.txt
+    node_conntrack_table.txt              # Full conntrack table (for connection analysis)
+    node_pod_ips.txt                      # All pod IPs on this node (for same-node identification)
     aws_node_full.log
     node_interface_dev_stats.txt          # Interface error statistics
     node_interface_ip_stats.txt            # ip -s link statistics
@@ -167,6 +171,7 @@ sgfp_api_diag_<timestamp>/
   error_codes_summary.txt                # Summary of all error codes
   throttle_by_action.txt
   throttle_by_caller.txt
+  calls_by_user.txt                       # API calls by user/caller ARN
   top_api_calls.txt
 ```
 
@@ -200,17 +205,19 @@ Collects pod-specific information including annotations, conditions, network nam
 Collects node-level diagnostics: conntrack usage, interface error statistics, socket overruns, and AWS VPC CNI logs.
 
 **Features:**
-- Automatically collects CNI logs from `/var/log/aws-routed-eni/` via temporary debug pod when not running on node
+- **Automatic CNI Log Collection**: Collects CNI logs from `/var/log/aws-routed-eni/` via temporary debug pod when not running on node (pod is automatically cleaned up)
+- **Conntrack Collection**: Collects full conntrack table via temporary pod if needed (for connection analysis)
+- **Pod IP Collection**: Collects all pod IPs on the node (for same-node vs cross-node connection identification)
 - Collects interface error statistics from `/proc/net/dev` and `ip -s link`
 - Collects socket statistics including overruns from `/proc/net/sockstat` and `/proc/net/snmp`
 - Creates error summaries for each CNI log file
-- Analyzes network namespaces for leaks (orphaned namespaces with no interfaces)
-- Detects IP address conflicts
-- Tests DNS resolution
-- Checks for resource exhaustion (file descriptors, memory)
-- Collects network policy rules (Kubernetes and CNI-specific)
-- Checks network interface states
-- Collects kernel logs, ARP table, iptables rules, and route tables
+- Analyzes network namespaces for leaks (orphaned namespaces with no interfaces, only flags as issue if older than 1 hour)
+- Detects IP address conflicts (duplicate IPs on node)
+- Tests DNS resolution (Kubernetes DNS, metadata service)
+- Checks for resource exhaustion (file descriptors, memory pressure)
+- Collects network policy rules (Kubernetes and CNI-specific: Calico, Cilium)
+- Checks network interface states (interfaces in unexpected DOWN state)
+- Collects kernel logs (dmesg), ARP table, iptables rules (filter and NAT), and route tables (all tables)
 
 ### `sgfp_aws_diag.sh` - AWS ENI Diagnostics
 Collects AWS ENI information: instance ID, VPC ID, trunk ENI, branch ENIs.
@@ -233,6 +240,12 @@ Generates a markdown report from the collected bundle.
 **Features:**
 - Shows Security Group IDs, names, and descriptions
 - Validates actual SGs against expected SGs (from annotations)
+- **Network Connections**:
+  - Pod network connections (listening ports and established connections from pod's perspective)
+  - Conntrack connections with direction labels (INBOUND/OUTBOUND)
+  - Same-node vs cross-node vs external connection identification
+  - Connection states (ESTABLISHED, CLOSE, TIME_WAIT, etc.)
+- Related logs (pod-specific log lines from CNI logs and aws-node logs)
 - Uses consistent `[OK]`, `[ISSUE]`, `[INFO]` format
 
 ### `sgfp_post_analyze.sh` - Quick Analysis
@@ -335,7 +348,14 @@ make clean-debug-pods NS=<namespace>   # Clean up debug pods interactively
 - **ICMP Reachability**: ICMP may be blocked; `pod_reachability.txt` is informational only.
 - **Security Groups**: SG names and descriptions require `ec2:DescribeSecurityGroups` permission. The toolkit automatically fetches this information when available.
 - **Dry-Run Operations**: API diagnostics distinguish between real errors/throttles and successful dry-run validations.
-- **CNI Log Collection**: When node diagnostics are run, the toolkit automatically creates a temporary privileged pod on the node to collect CNI logs from `/var/log/aws-routed-eni/`. The pod is automatically cleaned up after collection.
+- **CNI Log Collection**: When node diagnostics are run, the toolkit automatically creates a temporary privileged pod on the node to collect CNI logs from `/var/log/aws-routed-eni/` and conntrack data. The pod is automatically cleaned up after collection.
+- **Connection Analysis**: 
+  - Pod connections show listening ports and established connections from the pod's perspective
+  - Conntrack connections show both directions (INBOUND TO pod and OUTBOUND FROM pod) with connection states
+  - Connections are identified as same-node (pod on same node), cross-node (pod on different node in VPC), or external (outside VPC)
+  - This helps diagnose if connectivity issues are local to the node or cross-node networking problems
+- **Network Namespace Matching**: Attempts to match pod's network namespace using container ID (with fallback to pod UID) to handle AWS CNI's hashed namespace naming scheme
+- **Leak Detection**: Only flags empty network namespaces as issues if they're older than 1 hour (to avoid false positives from transient cleanup states)
 - **Node Debug Pod**: The `sgfp_node_debug.sh` script can accept either a pod name (will find the node) or a node name directly.
 - **Output Directories**: All diagnostic output directories (`sgfp_bundle_*`, `sgfp_diag_*`, `sgfp_api_diag_*`) are automatically ignored by git (see `.gitignore`).
 

@@ -111,6 +111,36 @@ else
   echo "" > "$OUT/pod_snmp.txt"
 fi
 
+# 2.4) Collect network connections (listening ports and established connections)
+# Try ss first (more modern), then netstat, then /proc/net/tcp
+if kubectl -n "$NS" exec "$POD" -- "$POD_SHELL" -c 'command -v ss >/dev/null 2>&1' >/dev/null 2>&1; then
+  {
+    echo "--- Listening ports (ss -tuln) ---"
+    kubectl -n "$NS" exec "$POD" -- "$POD_SHELL" -c 'ss -tuln 2>/dev/null || echo "ss command failed"' 2>/dev/null || echo "Failed to execute ss"
+    echo ""
+    echo "--- Established connections (ss -tun) ---"
+    kubectl -n "$NS" exec "$POD" -- "$POD_SHELL" -c 'ss -tun 2>/dev/null || echo "ss command failed"' 2>/dev/null || echo "Failed to execute ss"
+  } > "$OUT/pod_connections.txt" 2>/dev/null || echo "" > "$OUT/pod_connections.txt"
+elif kubectl -n "$NS" exec "$POD" -- "$POD_SHELL" -c 'command -v netstat >/dev/null 2>&1' >/dev/null 2>&1; then
+  {
+    echo "--- Listening ports (netstat -tuln) ---"
+    kubectl -n "$NS" exec "$POD" -- "$POD_SHELL" -c 'netstat -tuln 2>/dev/null || echo "netstat command failed"' 2>/dev/null || echo "Failed to execute netstat"
+    echo ""
+    echo "--- Established connections (netstat -tun) ---"
+    kubectl -n "$NS" exec "$POD" -- "$POD_SHELL" -c 'netstat -tun 2>/dev/null || echo "netstat command failed"' 2>/dev/null || echo "Failed to execute netstat"
+  } > "$OUT/pod_connections.txt" 2>/dev/null || echo "" > "$OUT/pod_connections.txt"
+elif kubectl -n "$NS" exec "$POD" -- "$POD_SHELL" -c 'test -r /proc/net/tcp 2>/dev/null' >/dev/null 2>&1; then
+  {
+    echo "--- TCP connections (from /proc/net/tcp) ---"
+    kubectl -n "$NS" exec "$POD" -- "$POD_SHELL" -c 'cat /proc/net/tcp 2>/dev/null | head -50 || echo "Failed to read /proc/net/tcp"' 2>/dev/null || echo "Failed to read /proc/net/tcp"
+    echo ""
+    echo "--- UDP connections (from /proc/net/udp) ---"
+    kubectl -n "$NS" exec "$POD" -- "$POD_SHELL" -c 'cat /proc/net/udp 2>/dev/null | head -50 || echo "Failed to read /proc/net/udp"' 2>/dev/null || echo "Failed to read /proc/net/udp"
+  } > "$OUT/pod_connections.txt" 2>/dev/null || echo "" > "$OUT/pod_connections.txt"
+else
+  echo "Note: Network connection tools (ss/netstat) not available and /proc/net/tcp not accessible" > "$OUT/pod_connections.txt"
+fi
+
 # 3) Reachability probes (informational, often blocked)
 {
   echo "## ping $POD_IP"

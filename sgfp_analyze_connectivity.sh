@@ -490,16 +490,18 @@ fi
 
 if [ -n "$API_DIAG_DIR" ] && [ -d "$API_DIAG_DIR" ]; then
   # Check for real errors/throttles
-  if [ -s "$API_DIAG_DIR/eni_errors.tsv" ]; then
+  ERROR_COUNT=0
+  if [ -f "$API_DIAG_DIR/eni_errors.tsv" ]; then
     ERROR_COUNT=$(wc -l < "$API_DIAG_DIR/eni_errors.tsv" 2>/dev/null | tr -d '[:space:]' || echo "0")
-    if [ "$ERROR_COUNT" -gt 0 ]; then
-      echo "[ISSUE] Found $ERROR_COUNT real error/throttle event(s) in CloudTrail"
-      echo "[INFO] Recent errors/throttles (last 5):"
-      head -5 "$API_DIAG_DIR/eni_errors.tsv" | awk -F'\t' '{printf "  - %s: %s (%s)\n", $2, $5, $6}' 2>/dev/null || true
-      issues=$((issues+1))
-    else
-      echo "[OK] No real errors/throttles found in CloudTrail"
-    fi
+  fi
+  
+  if [ "$ERROR_COUNT" -gt 0 ]; then
+    echo "[ISSUE] Found $ERROR_COUNT real error/throttle event(s) in CloudTrail"
+    echo "[INFO] Recent errors/throttles (last 5):"
+    head -5 "$API_DIAG_DIR/eni_errors.tsv" | awk -F'\t' '{printf "  - %s: %s (%s)\n", $2, $5, $6}' 2>/dev/null || true
+    issues=$((issues+1))
+  else
+    echo "[OK] No real errors/throttles found in CloudTrail"
   fi
   
   # Show throttle summary by action
@@ -508,6 +510,15 @@ if [ -n "$API_DIAG_DIR" ] && [ -d "$API_DIAG_DIR" ]; then
     if [ "$THROTTLE_COUNT" -gt 0 ]; then
       echo "[INFO] Throttles by action:"
       head -5 "$API_DIAG_DIR/throttle_by_action.txt" | sed 's/^/  - /'
+    fi
+  fi
+  
+  # Show API calls by user/caller
+  if [ -s "$API_DIAG_DIR/calls_by_user.txt" ]; then
+    USER_COUNT=$(wc -l < "$API_DIAG_DIR/calls_by_user.txt" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    if [ "$USER_COUNT" -gt 0 ]; then
+      echo "[INFO] API calls by user/caller:"
+      head -10 "$API_DIAG_DIR/calls_by_user.txt" | sed 's/^/  - /'
     fi
   fi
   

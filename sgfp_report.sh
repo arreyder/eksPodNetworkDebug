@@ -34,10 +34,16 @@ DEPLOYMENT_EXPECTED_SGS="$POD_DIR/deployment_expected_sgs.txt"
 REPLICASET_EXPECTED_SGS="$POD_DIR/replicaset_expected_sgs.txt"
 REACH="$POD_DIR/pod_reachability.txt"
 AWS_NODE_LOG_POD="$POD_DIR/aws_node_full.log"
+AWS_NODE_ERRORS="$POD_DIR/aws_node_errors.log"
 POD_ENI_ID="$POD_DIR/pod_branch_eni_id.txt"
 POD_VETH="$POD_DIR/pod_veth_interface.txt"
 POD_IF_STATS="$POD_DIR/pod_interface_stats.txt"
 POD_SNMP="$POD_DIR/pod_snmp.txt"
+POD_CONNECTIONS="$POD_DIR/pod_connections.txt"
+POD_CONNTRACK="$POD_DIR/pod_conntrack_connections.txt"
+POD_TIMING="$POD_DIR/pod_timing.txt"
+POD_FULL="$POD_DIR/pod_full.json"
+POD_IP_FILE="$POD_DIR/pod_ip.txt"
 CONN="${NODE_DIR:+$NODE_DIR/node_conntrack_mtu.txt}"
 NODE_IF_DEV="${NODE_DIR:+$NODE_DIR/node_interface_dev_stats.txt}"
 NODE_IF_IP="${NODE_DIR:+$NODE_DIR/node_interface_ip_stats.txt}"
@@ -175,12 +181,425 @@ if [ -s "$REACH" ]; then
   fi
 fi
 
-if [ -s "$AWS_NODE_LOG_POD" ]; then
-  if grep -Eiq 'rate.?exceeded|throttl|attach|branch|trunk|fail|error' "$AWS_NODE_LOG_POD"; then
-    say "[ISSUE] Interesting CNI events in pod aws-node logs (see \`pod_*/aws_node_full.log\`)"
+# Network connections
+# Note: /proc/net/tcp and ss/netstat show connections from the pod's perspective:
+# - LISTEN: ports the pod is listening on (waiting for inbound connections)
+# - ESTABLISHED: active connections (both inbound TO pod and outbound FROM pod)
+#   We can't definitively determine direction from /proc/net/tcp alone, but we can identify VPC/internal IPs
+if [ -s "$POD_CONNECTIONS" ]; then
+  if grep -qi "not available\|command failed\|Failed to" "$POD_CONNECTIONS"; then
+    say "[INFO] Network connection tools not available in pod"
   else
-    say "[OK] aws-node logs (pod scope) look clean"
+    echo >> "$REPORT"
+    say "[INFO] Pod network connections (from pod's perspective - includes both inbound and outbound):"
+    
+    # Check if this is /proc/net/tcp format (hex addresses) or ss/netstat format
+    if grep -qE "^[[:space:]]*[0-9]+:[[:space:]]+[0-9A-F]{8}:" "$POD_CONNECTIONS" 2>/dev/null; then
+      # /proc/net/tcp format - parse hex addresses
+      # State 0A = LISTEN (10), 01 = ESTABLISHED (1)
+      # Skip header lines (sl, local_address, etc.) and section headers (--- TCP connections ---)
+      LISTEN_COUNT=$(grep -E "^[[:space:]]*[0-9]+:[[:space:]]+[0-9A-F]{8}:" "$POD_CONNECTIONS" 2>/dev/null | grep -v "^---" | awk '{print $4}' | grep -cE "^0A$|^0a$" || echo "0")
+      ESTAB_COUNT=$(grep -E "^[[:space:]]*[0-9]+:[[:space:]]+[0-9A-F]{8}:" "$POD_CONNECTIONS" 2>/dev/null | grep -v "^---" | awk '{print $4}' | grep -cE "^01$" || echo "0")
+      
+      if [ "$LISTEN_COUNT" != "0" ] || [ "$ESTAB_COUNT" != "0" ]; then
+        say "[INFO] Listening ports: $LISTEN_COUNT | Established connections: $ESTAB_COUNT"
+        # Convert and show first few connections in readable format
+        CONN_TMP=$(mktemp)
+        grep -E "^[[:space:]]*[0-9]+:[[:space:]]+[0-9A-F]{8}:" "$POD_CONNECTIONS" 2>/dev/null | grep -v "^---" | head -10 | while read line; do
+          # Extract local and remote addresses (hex IP:port) and state
+          LOCAL_HEX=$(echo "$line" | awk '{print $2}' | cut -d: -f1)
+          LOCAL_PORT_HEX=$(echo "$line" | awk '{print $2}' | cut -d: -f2)
+          REMOTE_HEX=$(echo "$line" | awk '{print $3}' | cut -d: -f1)
+          REMOTE_PORT_HEX=$(echo "$line" | awk '{print $3}' | cut -d: -f2)
+          STATE=$(echo "$line" | awk '{print $4}')
+          
+          # Convert hex IP to decimal (little-endian format in /proc/net/tcp)
+          # Format: 0100007F means 127.0.0.1 (bytes reversed: 7F 00 00 01)
+          if [ ${#LOCAL_HEX} -eq 8 ]; then
+            LOCAL_IP=$(printf "%d.%d.%d.%d" 0x${LOCAL_HEX:6:2} 0x${LOCAL_HEX:4:2} 0x${LOCAL_HEX:2:2} 0x${LOCAL_HEX:0:2} 2>/dev/null || echo "unknown")
+          else
+            LOCAL_IP="unknown"
+          fi
+          LOCAL_PORT=$(printf "%d" 0x$LOCAL_PORT_HEX 2>/dev/null || echo "unknown")
+          if [ ${#REMOTE_HEX} -eq 8 ]; then
+            REMOTE_IP=$(printf "%d.%d.%d.%d" 0x${REMOTE_HEX:6:2} 0x${REMOTE_HEX:4:2} 0x${REMOTE_HEX:2:2} 0x${REMOTE_HEX:0:2} 2>/dev/null || echo "unknown")
+          else
+            REMOTE_IP="unknown"
+          fi
+          REMOTE_PORT=$(printf "%d" 0x$REMOTE_PORT_HEX 2>/dev/null || echo "unknown")
+          
+          # Map state codes
+          case "$STATE" in
+            01) STATE_NAME="ESTABLISHED" ;;
+            0A) STATE_NAME="LISTEN" ;;
+            02) STATE_NAME="SYN_SENT" ;;
+            03) STATE_NAME="SYN_RECV" ;;
+            04) STATE_NAME="FIN_WAIT1" ;;
+            05) STATE_NAME="FIN_WAIT2" ;;
+            06) STATE_NAME="TIME_WAIT" ;;
+            07) STATE_NAME="CLOSE" ;;
+            08) STATE_NAME="CLOSE_WAIT" ;;
+            09) STATE_NAME="LAST_ACK" ;;
+            *) STATE_NAME="STATE_$STATE" ;;
+          esac
+          
+          # Only output if we successfully parsed the IP
+          if [ "$LOCAL_IP" != "unknown" ] && [ "$LOCAL_PORT" != "unknown" ]; then
+            if [ "$STATE" = "0A" ] || [ "$STATE" = "0a" ]; then
+              echo "  - LISTEN: $LOCAL_IP:$LOCAL_PORT" >> "$CONN_TMP"
+            elif [ "$REMOTE_IP" != "unknown" ] && [ "$REMOTE_PORT" != "unknown" ]; then
+              # Try to determine if this is likely an inbound or outbound connection
+              # Inbound: remote IP connects TO pod's local port
+              # Outbound: pod connects FROM local port TO remote IP
+              # We can't definitively tell from /proc/net/tcp, but we can note VPC IPs
+              if echo "$REMOTE_IP" | grep -qE "^10\.|^172\.(1[6-9]|2[0-9]|3[01])\.|^192\.168\."; then
+                # Remote is in private IP range (likely VPC/internal)
+                echo "  - $STATE_NAME: $LOCAL_IP:$LOCAL_PORT <-> $REMOTE_IP:$REMOTE_PORT (VPC/internal)" >> "$CONN_TMP"
+              else
+                # Remote is public IP (likely outbound)
+                echo "  - $STATE_NAME: $LOCAL_IP:$LOCAL_PORT -> $REMOTE_IP:$REMOTE_PORT (external)" >> "$CONN_TMP"
+              fi
+            else
+              echo "  - $STATE_NAME: $LOCAL_IP:$LOCAL_PORT -> (connecting...)" >> "$CONN_TMP"
+            fi
+          fi
+        done
+        [ -s "$CONN_TMP" ] && cat "$CONN_TMP" >> "$REPORT" 2>/dev/null || true
+        rm -f "$CONN_TMP" 2>/dev/null || true
+        
+        TOTAL_CONN=$(grep -E "^[[:space:]]*[0-9]+:[[:space:]]+[0-9A-F]{8}:" "$POD_CONNECTIONS" 2>/dev/null | grep -v "^---" | wc -l | tr -d '[:space:]' || echo "0")
+        if [ "$TOTAL_CONN" -gt 10 ]; then
+          say "[INFO] ... (see pod_connections.txt for full connection list)"
+        fi
+      else
+        say "[INFO] No active connections detected"
+      fi
+    else
+      # ss or netstat format
+      LISTEN_COUNT=$(grep -iE "listen|0\.0\.0\.0|:::" "$POD_CONNECTIONS" 2>/dev/null | grep -v "^---" | wc -l | tr -d '[:space:]' || echo "0")
+      ESTAB_COUNT=$(grep -iE "established|estab" "$POD_CONNECTIONS" 2>/dev/null | grep -v "^---" | wc -l | tr -d '[:space:]' || echo "0")
+      
+      if [ "$LISTEN_COUNT" != "0" ] || [ "$ESTAB_COUNT" != "0" ]; then
+        say "[INFO] Listening ports: $LISTEN_COUNT | Established connections: $ESTAB_COUNT"
+        # Show first 10 non-header lines
+        grep -v "^---" "$POD_CONNECTIONS" 2>/dev/null | head -10 | sed 's/^/  - /' >> "$REPORT" 2>/dev/null || true
+        TOTAL_LINES=$(grep -v "^---" "$POD_CONNECTIONS" 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+        if [ "$TOTAL_LINES" -gt 10 ]; then
+          say "[INFO] ... (see pod_connections.txt for full connection list)"
+        fi
+      else
+        say "[INFO] No active connections detected"
+      fi
+    fi
   fi
+fi
+
+# Conntrack connections (from node, filtered by pod IP)
+# Conntrack shows both directions: connections TO the pod (inbound) and FROM the pod (outbound)
+# This is the best way to see all connections involving the pod, including inbound connections
+if [ -s "$POD_CONNTRACK" ]; then
+  # Get pod IP for direction detection (set it here if not already set)
+  if [ -z "${POD_IP:-}" ]; then
+    POD_IP=$(grep "^POD_IP=" "$POD_IP_FILE" 2>/dev/null | cut -d= -f2- || echo "")
+  fi
+  
+  # Get node pod IPs for same-node vs cross-node analysis
+  NODE_POD_IPS=""
+  if [ -n "$NODE_DIR" ] && [ -f "$NODE_DIR/node_pod_ips.txt" ]; then
+    NODE_POD_IPS="$NODE_DIR/node_pod_ips.txt"
+  fi
+  
+  # Count non-empty, non-whitespace lines
+  CONNTRACK_COUNT=$(grep -v '^[[:space:]]*$' "$POD_CONNTRACK" 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+  if [ "$CONNTRACK_COUNT" -gt 0 ]; then
+    echo >> "$REPORT"
+    say "[INFO] Connections tracked by conntrack (node-level, filtered by pod IP - shows both inbound TO pod and outbound FROM pod): $CONNTRACK_COUNT connection(s)"
+    
+    # Count inbound vs outbound if we have pod IP
+    # Note: We count based on the FIRST src/dst pair (original direction) to avoid double-counting
+    # Each conntrack entry has both original and reply directions, so we only look at the first match
+    INBOUND_COUNT=0
+    OUTBOUND_COUNT=0
+    if [ -n "$POD_IP" ]; then
+      # Count connections where pod IP is the destination in the first src/dst pair (inbound)
+      INBOUND_COUNT=$(grep -v '^[[:space:]]*$' "$POD_CONNTRACK" 2>/dev/null | grep -oE "src=[0-9.]+[[:space:]]+dst=${POD_IP}[[:space:]]" | wc -l | tr -d '[:space:]' || echo "0")
+      # Count connections where pod IP is the source in the first src/dst pair (outbound)
+      OUTBOUND_COUNT=$(grep -v '^[[:space:]]*$' "$POD_CONNTRACK" 2>/dev/null | grep -oE "src=${POD_IP}[[:space:]]+dst=[0-9.]+[[:space:]]" | wc -l | tr -d '[:space:]' || echo "0")
+    fi
+    
+    if [ "$INBOUND_COUNT" -gt 0 ] || [ "$OUTBOUND_COUNT" -gt 0 ]; then
+      say "[INFO]   Inbound (TO pod): $INBOUND_COUNT | Outbound (FROM pod): $OUTBOUND_COUNT"
+    fi
+    
+    # Show non-empty lines only, format for readability
+    CONN_TMP=$(mktemp)
+    # Use process substitution to avoid subshell issues with while read
+    while IFS= read -r line || [ -n "$line" ]; do
+      [ -z "$line" ] && continue
+      # Try to extract and format conntrack entry for better readability
+      # Conntrack format: ipv4 2 tcp 6 <timeout> <STATE> src=... dst=... sport=... dport=... src=... dst=... sport=... dport=...
+      # The first src/dst pair is the original direction, second is the reply
+      if echo "$line" | grep -qE "src=|dst="; then
+        # Extract first src/dst pair (original direction) - use head -1 to get only the first match
+        SRC=$(echo "$line" | grep -oE "src=[0-9.]+" | head -1 | cut -d= -f2 || echo "")
+        DST=$(echo "$line" | grep -oE "dst=[0-9.]+" | head -1 | cut -d= -f2 || echo "")
+        SPORT=$(echo "$line" | grep -oE "sport=[0-9]+" | head -1 | cut -d= -f2 || echo "")
+        DPORT=$(echo "$line" | grep -oE "dport=[0-9]+" | head -1 | cut -d= -f2 || echo "")
+        # State is usually a field before the src=, extract it
+        STATE=$(echo "$line" | grep -oE "[[:space:]](ESTABLISHED|CLOSE|TIME_WAIT|SYN_SENT|SYN_RECV|FIN_WAIT1|FIN_WAIT2|CLOSE_WAIT|LAST_ACK|LISTEN)[[:space:]]" | tr -d '[:space:]' || echo "")
+        if [ -z "$STATE" ]; then
+          # Try alternative format where state might be after protocol
+          STATE=$(echo "$line" | awk '{for(i=1;i<=NF;i++) if($i ~ /^(ESTABLISHED|CLOSE|TIME_WAIT|SYN_SENT|SYN_RECV|FIN_WAIT1|FIN_WAIT2|CLOSE_WAIT|LAST_ACK|LISTEN)$/) {print $i; exit}}' || echo "")
+        fi
+        if [ -n "$SRC" ] && [ -n "$DST" ] && [ -n "$SPORT" ] && [ -n "$DPORT" ]; then
+          # Determine if connection is same-node or cross-node
+          REMOTE_IP=""
+          NODE_TYPE=""
+          if [ -n "$POD_IP" ] && echo "$DST" | grep -q "^${POD_IP}$"; then
+            # Connection TO pod (inbound) - remote is SRC
+            REMOTE_IP="$SRC"
+            DIRECTION="INBOUND"
+          elif [ -n "$POD_IP" ] && echo "$SRC" | grep -q "^${POD_IP}$"; then
+            # Connection FROM pod (outbound) - remote is DST
+            REMOTE_IP="$DST"
+            DIRECTION="OUTBOUND"
+          else
+            # Can't determine direction
+            REMOTE_IP=""
+            DIRECTION=""
+          fi
+          
+          # Check if remote IP is on same node
+          if [ -n "$REMOTE_IP" ] && [ -n "$NODE_POD_IPS" ] && [ -s "$NODE_POD_IPS" ]; then
+            if grep -q "^${REMOTE_IP}$" "$NODE_POD_IPS" 2>/dev/null; then
+              NODE_TYPE=" (same-node)"
+            elif echo "$REMOTE_IP" | grep -qE "^10\.|^172\.(1[6-9]|2[0-9]|3[01])\.|^192\.168\."; then
+              # VPC IP but not on this node = cross-node
+              NODE_TYPE=" (cross-node)"
+            else
+              # External IP
+              NODE_TYPE=" (external)"
+            fi
+          elif [ -n "$REMOTE_IP" ]; then
+            # Can't determine node location
+            if echo "$REMOTE_IP" | grep -qE "^10\.|^172\.(1[6-9]|2[0-9]|3[01])\.|^192\.168\."; then
+              NODE_TYPE=" (VPC/internal)"
+            else
+              NODE_TYPE=" (external)"
+            fi
+          fi
+          
+          # Format output
+          if [ -n "$DIRECTION" ]; then
+            echo "  - ${DIRECTION}: $SRC:$SPORT -> $DST:$DPORT${NODE_TYPE}${STATE:+ ($STATE)}" >> "$CONN_TMP" 2>/dev/null || true
+          else
+            echo "  - $SRC:$SPORT <-> $DST:$DPORT${NODE_TYPE}${STATE:+ ($STATE)}" >> "$CONN_TMP" 2>/dev/null || true
+          fi
+        else
+          # Fallback: show raw line
+          echo "  - $line" >> "$CONN_TMP" 2>/dev/null || true
+        fi
+      else
+        # Not standard conntrack format, show as-is
+        echo "  - $line" >> "$CONN_TMP" 2>/dev/null || true
+      fi
+    done < <(grep -v '^[[:space:]]*$' "$POD_CONNTRACK" 2>/dev/null | head -10)
+    [ -s "$CONN_TMP" ] && cat "$CONN_TMP" >> "$REPORT" 2>/dev/null || true
+    rm -f "$CONN_TMP" 2>/dev/null || true
+    
+    if [ "$CONNTRACK_COUNT" -gt 10 ]; then
+      say "[INFO] ... and $((CONNTRACK_COUNT - 10)) more connection(s) (see pod_conntrack_connections.txt)"
+    fi
+  fi
+fi
+
+# Log Files Summary (with error counts and file locations)
+# Show summary of log files with errors, making it easy to find and review them
+echo >> "$REPORT"
+echo "## Log Files Summary" >> "$REPORT"
+
+LOG_FILES_WITH_ERRORS=0
+
+# Check aws-node errors log from pod diagnostics
+if [ -s "$AWS_NODE_ERRORS" ]; then
+  ERROR_COUNT=$(grep -v '^[[:space:]]*$' "$AWS_NODE_ERRORS" 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+  if [ "$ERROR_COUNT" -gt 0 ]; then
+    LOG_FILES_WITH_ERRORS=$((LOG_FILES_WITH_ERRORS + 1))
+    REL_PATH=$(echo "$AWS_NODE_ERRORS" | sed "s|^$BUNDLE/||" || echo "$AWS_NODE_ERRORS")
+    say "[ISSUE] aws_node_errors.log: $ERROR_COUNT error/warning line(s) - \`$REL_PATH\`"
+  fi
+fi
+
+# Check aws-node full log from pod diagnostics
+if [ -s "$AWS_NODE_LOG_POD" ]; then
+  TOTAL_LINES=$(wc -l < "$AWS_NODE_LOG_POD" 2>/dev/null | tr -d '[:space:]' || echo "0")
+  if [ "$TOTAL_LINES" -gt 0 ]; then
+    REL_PATH=$(echo "$AWS_NODE_LOG_POD" | sed "s|^$BUNDLE/||" || echo "$AWS_NODE_LOG_POD")
+    say "[INFO] aws_node_full.log: $TOTAL_LINES line(s) - \`$REL_PATH\`"
+  fi
+fi
+
+# Check CNI logs from node diagnostics
+NODE_CNI_LOGS_DIR=""
+if [ -n "$NODE_DIR" ]; then
+  NODE_CNI_LOGS_DIR="$NODE_DIR/cni_logs"
+fi
+
+if [ -n "$NODE_CNI_LOGS_DIR" ] && [ -d "$NODE_CNI_LOGS_DIR" ]; then
+  # Check each log file and its error summary
+  for LOG_FILE in "$NODE_CNI_LOGS_DIR"/*.log; do
+    [ ! -f "$LOG_FILE" ] && continue
+    LOG_NAME=$(basename "$LOG_FILE")
+    ERROR_FILE="${LOG_FILE}.errors"
+    
+    # Count total lines in log file
+    TOTAL_LINES=$(wc -l < "$LOG_FILE" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    
+    # Count errors if error file exists
+    ERROR_COUNT=0
+    if [ -f "$ERROR_FILE" ] && [ -s "$ERROR_FILE" ]; then
+      ERROR_COUNT=$(grep -v '^[[:space:]]*$' "$ERROR_FILE" 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+    fi
+    
+    if [ "$TOTAL_LINES" -gt 0 ] || [ "$ERROR_COUNT" -gt 0 ]; then
+      REL_PATH=$(echo "$LOG_FILE" | sed "s|^$BUNDLE/||" || echo "$LOG_FILE")
+      if [ "$ERROR_COUNT" -gt 0 ]; then
+        LOG_FILES_WITH_ERRORS=$((LOG_FILES_WITH_ERRORS + 1))
+        say "[ISSUE] $LOG_NAME: $ERROR_COUNT error/warning line(s) (of $TOTAL_LINES total) - \`$REL_PATH\`"
+      else
+        say "[INFO] $LOG_NAME: $TOTAL_LINES line(s) (no errors) - \`$REL_PATH\`"
+      fi
+    fi
+  done
+fi
+
+# Check node-level aws-node logs
+NODE_AWS_LOG="${NODE_DIR:+$NODE_DIR/aws_node_full.log}"
+if [ -n "$NODE_AWS_LOG" ] && [ -s "$NODE_AWS_LOG" ]; then
+  TOTAL_LINES=$(wc -l < "$NODE_AWS_LOG" 2>/dev/null | tr -d '[:space:]' || echo "0")
+  if [ "$TOTAL_LINES" -gt 0 ]; then
+    REL_PATH=$(echo "$NODE_AWS_LOG" | sed "s|^$BUNDLE/||" || echo "$NODE_AWS_LOG")
+    say "[INFO] aws_node_full.log (node): $TOTAL_LINES line(s) - \`$REL_PATH\`"
+  fi
+fi
+
+if [ "$LOG_FILES_WITH_ERRORS" -eq 0 ]; then
+  say "[OK] No log files with errors found"
+fi
+
+# Optional: Show related log lines if SHOW_RELATED_LOGS environment variable is set
+if [ "${SHOW_RELATED_LOGS:-}" = "1" ] || [ "${SHOW_RELATED_LOGS:-}" = "true" ]; then
+  echo >> "$REPORT"
+  echo "### Related Log Lines (pod-specific)" >> "$REPORT"
+  say "[INFO] Showing related log lines (set SHOW_RELATED_LOGS=1 to enable)"
+  
+  # Collect pod identifiers for matching
+  POD_IP=$(grep "^POD_IP=" "$POD_IP_FILE" 2>/dev/null | cut -d= -f2- || echo "")
+  POD_UID=$(grep "^UID=" "$POD_TIMING" 2>/dev/null | cut -d= -f2- || echo "")
+  ENI_ID=$(cat "$POD_ENI_ID" 2>/dev/null | tr -d '[:space:]' || echo "")
+  
+  # Extract container ID from pod status (infra/pause container)
+  CONTAINER_ID=""
+  if [ -s "$POD_FULL" ]; then
+    CONTAINER_ID=$(jq -r '.status.containerStatuses[]? | select(.name | test("POD|infra|pause")) | .containerID // empty' "$POD_FULL" 2>/dev/null | head -1 || echo "")
+    if [ -z "$CONTAINER_ID" ] || [ "$CONTAINER_ID" = "null" ] || [ "$CONTAINER_ID" = "" ]; then
+      CONTAINER_ID=$(jq -r '.status.containerStatuses[0]? | .containerID // empty' "$POD_FULL" 2>/dev/null | head -1 || echo "")
+    fi
+    # Remove container runtime prefix
+    if [ -n "$CONTAINER_ID" ] && [ "$CONTAINER_ID" != "null" ] && [ "$CONTAINER_ID" != "" ]; then
+      CONTAINER_ID=$(echo "$CONTAINER_ID" | sed 's|^[^:]*://||' || echo "$CONTAINER_ID")
+    fi
+  fi
+  
+  # Short container ID (first 12 chars, commonly used in logs)
+  CONTAINER_ID_SHORT=""
+  if [ -n "$CONTAINER_ID" ] && [ "$CONTAINER_ID" != "null" ] && [ "$CONTAINER_ID" != "" ]; then
+    CONTAINER_ID_SHORT=$(echo "$CONTAINER_ID" | head -c 12 || echo "")
+  fi
+  
+  RELATED_LOGS_FOUND=0
+  RELATED_LOGS_TMP=$(mktemp)
+  
+  # Search aws-node logs from pod diagnostics
+  if [ -s "$AWS_NODE_LOG_POD" ]; then
+    {
+      [ -n "$POD" ] && grep -i "$POD" "$AWS_NODE_LOG_POD" 2>/dev/null || true
+      [ -n "$CONTAINER_ID" ] && grep -i "$CONTAINER_ID" "$AWS_NODE_LOG_POD" 2>/dev/null || true
+      [ -n "$CONTAINER_ID_SHORT" ] && grep -i "$CONTAINER_ID_SHORT" "$AWS_NODE_LOG_POD" 2>/dev/null || true
+      [ -n "$ENI_ID" ] && grep -i "$ENI_ID" "$AWS_NODE_LOG_POD" 2>/dev/null || true
+      [ -n "$POD_IP" ] && grep -i "$POD_IP" "$AWS_NODE_LOG_POD" 2>/dev/null || true
+      [ -n "$POD_UID" ] && grep -i "$POD_UID" "$AWS_NODE_LOG_POD" 2>/dev/null || true
+    } | sort -u > "$RELATED_LOGS_TMP" 2>/dev/null || true
+    
+    if [ -s "$RELATED_LOGS_TMP" ]; then
+      RELATED_LOGS_FOUND=1
+      say "[INFO] Related lines from aws-node logs:"
+      head -20 "$RELATED_LOGS_TMP" | sed 's/^/  - /' >> "$REPORT" 2>/dev/null || true
+      TOTAL_LINES=$(wc -l < "$RELATED_LOGS_TMP" 2>/dev/null | tr -d '[:space:]' || echo "0")
+      if [ "$TOTAL_LINES" -gt 20 ]; then
+        say "[INFO] ... and $((TOTAL_LINES - 20)) more line(s)"
+      fi
+    fi
+  fi
+  
+  # Search CNI logs from node diagnostics
+  if [ -n "$NODE_CNI_LOGS_DIR" ] && [ -d "$NODE_CNI_LOGS_DIR" ]; then
+    for CNI_LOG in "$NODE_CNI_LOGS_DIR"/*.log; do
+      [ ! -f "$CNI_LOG" ] && continue
+      LOG_NAME=$(basename "$CNI_LOG")
+      
+      {
+        [ -n "$POD" ] && grep -i "$POD" "$CNI_LOG" 2>/dev/null || true
+        [ -n "$CONTAINER_ID" ] && grep -i "$CONTAINER_ID" "$CNI_LOG" 2>/dev/null || true
+        [ -n "$CONTAINER_ID_SHORT" ] && grep -i "$CONTAINER_ID_SHORT" "$CNI_LOG" 2>/dev/null || true
+        [ -n "$ENI_ID" ] && grep -i "$ENI_ID" "$CNI_LOG" 2>/dev/null || true
+        [ -n "$POD_IP" ] && grep -i "$POD_IP" "$CNI_LOG" 2>/dev/null || true
+        [ -n "$POD_UID" ] && grep -i "$POD_UID" "$CNI_LOG" 2>/dev/null || true
+      } | sort -u > "$RELATED_LOGS_TMP" 2>/dev/null || true
+      
+      if [ -s "$RELATED_LOGS_TMP" ]; then
+        if [ "$RELATED_LOGS_FOUND" -eq 0 ]; then
+          RELATED_LOGS_FOUND=1
+        fi
+        say "[INFO] Related lines from $LOG_NAME:"
+        head -15 "$RELATED_LOGS_TMP" | sed 's/^/  - /' >> "$REPORT" 2>/dev/null || true
+        TOTAL_LINES=$(wc -l < "$RELATED_LOGS_TMP" 2>/dev/null | tr -d '[:space:]' || echo "0")
+        if [ "$TOTAL_LINES" -gt 15 ]; then
+          say "[INFO] ... and $((TOTAL_LINES - 15)) more line(s) from $LOG_NAME"
+        fi
+      fi
+    done
+  fi
+  
+  # Search node-level aws-node logs
+  if [ -n "$NODE_AWS_LOG" ] && [ -s "$NODE_AWS_LOG" ]; then
+    {
+      [ -n "$POD" ] && grep -i "$POD" "$NODE_AWS_LOG" 2>/dev/null || true
+      [ -n "$CONTAINER_ID" ] && grep -i "$CONTAINER_ID" "$NODE_AWS_LOG" 2>/dev/null || true
+      [ -n "$CONTAINER_ID_SHORT" ] && grep -i "$CONTAINER_ID_SHORT" "$NODE_AWS_LOG" 2>/dev/null || true
+      [ -n "$ENI_ID" ] && grep -i "$ENI_ID" "$NODE_AWS_LOG" 2>/dev/null || true
+      [ -n "$POD_IP" ] && grep -i "$POD_IP" "$NODE_AWS_LOG" 2>/dev/null || true
+      [ -n "$POD_UID" ] && grep -i "$POD_UID" "$NODE_AWS_LOG" 2>/dev/null || true
+    } | sort -u > "$RELATED_LOGS_TMP" 2>/dev/null || true
+    
+    if [ -s "$RELATED_LOGS_TMP" ]; then
+      if [ "$RELATED_LOGS_FOUND" -eq 0 ]; then
+        RELATED_LOGS_FOUND=1
+      fi
+      say "[INFO] Related lines from aws-node logs (node):"
+      head -20 "$RELATED_LOGS_TMP" | sed 's/^/  - /' >> "$REPORT" 2>/dev/null || true
+      TOTAL_LINES=$(wc -l < "$RELATED_LOGS_TMP" 2>/dev/null | tr -d '[:space:]' || echo "0")
+      if [ "$TOTAL_LINES" -gt 20 ]; then
+        say "[INFO] ... and $((TOTAL_LINES - 20)) more line(s)"
+      fi
+    fi
+  fi
+  
+  if [ "$RELATED_LOGS_FOUND" -eq 0 ]; then
+    say "[INFO] No related log lines found"
+  fi
+  
+  rm -f "$RELATED_LOGS_TMP" 2>/dev/null || true
 fi
 
 echo >> "$REPORT"
@@ -278,12 +697,12 @@ if [ -n "$NODE_CNI_LOGS_DIR" ] && [ -d "$NODE_CNI_LOGS_DIR" ]; then
   for ERROR_FILE in "$NODE_CNI_LOGS_DIR"/*.errors; do
     if [ -f "$ERROR_FILE" ] && [ -s "$ERROR_FILE" ]; then
       LOG_NAME=$(basename "$ERROR_FILE" .errors)
-      ERROR_COUNT=$(wc -l < "$ERROR_FILE" 2>/dev/null | tr -d '[:space:]' || echo "0")
+      ERROR_COUNT=$(grep -v '^[[:space:]]*$' "$ERROR_FILE" 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
       if [ "$ERROR_COUNT" -gt 0 ]; then
         say "[ISSUE] $LOG_NAME: $ERROR_COUNT error/warning line(s)"
         CNI_ERRORS_FOUND=$((CNI_ERRORS_FOUND + 1))
-        # Show recent errors
-        tail -3 "$ERROR_FILE" | sed 's/^/    /' >> "$REPORT" 2>/dev/null || true
+        # Show recent errors (limit to 2 to keep it concise)
+        tail -2 "$ERROR_FILE" | sed 's/^/    /' >> "$REPORT" 2>/dev/null || true
       fi
     fi
   done
@@ -292,10 +711,10 @@ if [ -n "$NODE_CNI_LOGS_DIR" ] && [ -d "$NODE_CNI_LOGS_DIR" ]; then
     say "[OK] No errors found in node CNI logs"
   fi
   
-  # List available log files
+  # List available log files count
   LOG_FILES=$(ls -1 "$NODE_CNI_LOGS_DIR"/*.log 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
   if [ "$LOG_FILES" -gt 0 ]; then
-    say "[INFO] Collected $LOG_FILES CNI log file(s) (see node diagnostics for full logs)"
+    say "[INFO] Collected $LOG_FILES CNI log file(s) (see Log Files Summary for details)"
   fi
 fi
 
@@ -389,15 +808,17 @@ if [ -n "$API_DIAG_DIR" ] && [ -d "$API_DIAG_DIR" ]; then
   echo "## CloudTrail API Diagnostics" >> "$REPORT"
   
   # Check for real errors/throttles
-  if [ -s "$API_DIAG_DIR/eni_errors.tsv" ]; then
+  ERROR_COUNT=0
+  if [ -f "$API_DIAG_DIR/eni_errors.tsv" ]; then
     ERROR_COUNT=$(wc -l < "$API_DIAG_DIR/eni_errors.tsv" 2>/dev/null | tr -d '[:space:]' || echo "0")
-    if [ "$ERROR_COUNT" -gt 0 ]; then
-      say "[ISSUE] Found $ERROR_COUNT real error/throttle event(s) in CloudTrail"
-      # Show recent errors
-      head -5 "$API_DIAG_DIR/eni_errors.tsv" | awk -F'\t' '{printf "  - %s: %s (%s)\n", $2, $5, $6}' >> "$REPORT" 2>/dev/null || true
-    else
-      say "[OK] No real errors/throttles found in CloudTrail"
-    fi
+  fi
+  
+  if [ "$ERROR_COUNT" -gt 0 ]; then
+    say "[ISSUE] Found $ERROR_COUNT real error/throttle event(s) in CloudTrail"
+    # Show recent errors
+    head -5 "$API_DIAG_DIR/eni_errors.tsv" | awk -F'\t' '{printf "  - %s: %s (%s)\n", $2, $5, $6}' >> "$REPORT" 2>/dev/null || true
+  else
+    say "[OK] No real errors/throttles found in CloudTrail"
   fi
   
   # Show throttle summary by action
@@ -406,6 +827,15 @@ if [ -n "$API_DIAG_DIR" ] && [ -d "$API_DIAG_DIR" ]; then
     if [ "$THROTTLE_COUNT" -gt 0 ]; then
       say "[INFO] Throttles by action:"
       head -5 "$API_DIAG_DIR/throttle_by_action.txt" | sed 's/^/  - /' >> "$REPORT" 2>/dev/null || true
+    fi
+  fi
+  
+  # Show API calls by user/caller
+  if [ -s "$API_DIAG_DIR/calls_by_user.txt" ]; then
+    USER_COUNT=$(wc -l < "$API_DIAG_DIR/calls_by_user.txt" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    if [ "$USER_COUNT" -gt 0 ]; then
+      say "[INFO] API calls by user/caller:"
+      head -10 "$API_DIAG_DIR/calls_by_user.txt" | sed 's/^/  - /' >> "$REPORT" 2>/dev/null || true
     fi
   fi
   
@@ -436,6 +866,22 @@ if [ -n "$BR_JSON" ] && [ -s "$BR_JSON" ] && jq -e 'length>0' "$BR_JSON" >/dev/n
 else
   say "[INFO] No branch ENIs found in VPC scan (or insufficient perms)"
 fi
+
+# Commands to view related logs
+echo >> "$REPORT"
+echo "## View Related Logs" >> "$REPORT"
+say "[INFO] Use the helper script to view pod-specific log lines from the collected bundle:"
+echo "" >> "$REPORT"
+echo "\`\`\`bash" >> "$REPORT"
+echo "# View all pod-related log lines" >> "$REPORT"
+echo "./sgfp_view_logs.sh \"$BUNDLE\"" >> "$REPORT"
+echo "" >> "$REPORT"
+echo "# View only errors/warnings" >> "$REPORT"
+echo "./sgfp_view_logs.sh \"$BUNDLE\" --errors-only" >> "$REPORT"
+echo "" >> "$REPORT"
+echo "# View all log lines (not filtered)" >> "$REPORT"
+echo "./sgfp_view_logs.sh \"$BUNDLE\" --all-logs" >> "$REPORT"
+echo "\`\`\`" >> "$REPORT"
 
 echo >> "$REPORT"
 echo "---" >> "$REPORT"

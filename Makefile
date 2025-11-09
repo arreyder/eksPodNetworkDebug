@@ -1,5 +1,5 @@
 
-.PHONY: collect api report analyze doctor clean clean-debug-pods node-debug
+.PHONY: collect api report analyze doctor clean clean-debug-pods node-debug view-logs
 
 NS ?= default
 POD ?=
@@ -40,3 +40,7 @@ clean-debug-pods:
 node-debug:
 	@[ -n "$(TARGET)" ] || (echo "TARGET required: make node-debug TARGET=<pod-name|node-name> [NS=default] [IMAGE=ubuntu]"; exit 1)
 	@./sgfp_node_debug.sh $(TARGET) $(NS) $(IMAGE)
+
+view-logs:
+	@[ -n "$(BUNDLE)" ] || (echo "BUNDLE required: make view-logs BUNDLE=<bundle-dir> [OPTIONS=--errors-only|--all-logs]"; exit 1)
+	@./sgfp_view_logs.sh $(BUNDLE) $(OPTIONS)
