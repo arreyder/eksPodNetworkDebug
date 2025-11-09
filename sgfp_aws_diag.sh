@@ -126,4 +126,106 @@ else
   warn "VPC ID not available, skipping branch ENI scan"
 fi
 
+# Collect NAT gateway information and CloudWatch metrics
+if [ -n "$VPC" ] && [ -n "$REGION" ]; then
+  log "Collecting NAT gateway information..."
+  
+  # Get NAT gateways in VPC
+  if [ -n "${REGION:-}" ]; then
+    aws ec2 describe-nat-gateways --region "$REGION" \
+      --filter "Name=vpc-id,Values=$VPC" \
+      --filter "Name=state,Values=available" \
+      --query 'NatGateways[].[NatGatewayId,SubnetId,State,PublicIp]' \
+      --output json > "$OUT/nat_gateways.json" 2>/dev/null || echo "[]" > "$OUT/nat_gateways.json"
+  else
+    aws ec2 describe-nat-gateways \
+      --filter "Name=vpc-id,Values=$VPC" \
+      --filter "Name=state,Values=available" \
+      --query 'NatGateways[].[NatGatewayId,SubnetId,State,PublicIp]' \
+      --output json > "$OUT/nat_gateways.json" 2>/dev/null || echo "[]" > "$OUT/nat_gateways.json"
+  fi
+  
+  NAT_COUNT=$(jq -r 'length' "$OUT/nat_gateways.json" 2>/dev/null || echo 0)
+  if [ "$NAT_COUNT" -gt 0 ]; then
+    log "Found $NAT_COUNT NAT gateway(s) in VPC"
+    
+    # Collect CloudWatch metrics for each NAT gateway
+    # Metrics: ActiveConnectionCount (indicator of SNAT port usage)
+    # Time range: use WINDOW_MINUTES env var (same as CloudTrail), default to 2880 minutes (2 days)
+    WINDOW_MINUTES="${WINDOW_MINUTES:-2880}"
+    END_TIME=$(date -u +"%Y-%m-%dT%H:%M:%S" 2>/dev/null || echo "")
+    # Try GNU date first, fall back to BSD date
+    if date -u -d "${WINDOW_MINUTES} minutes ago" +"%Y-%m-%dT%H:%M:%S" >/dev/null 2>&1; then
+      START_TIME=$(date -u -d "${WINDOW_MINUTES} minutes ago" +"%Y-%m-%dT%H:%M:%S" 2>/dev/null || echo "")
+    elif date -u -v-"${WINDOW_MINUTES}"M +"%Y-%m-%dT%H:%M:%S" >/dev/null 2>&1; then
+      START_TIME=$(date -u -v-"${WINDOW_MINUTES}"M +"%Y-%m-%dT%H:%M:%S" 2>/dev/null || echo "")
+    else
+      # Fallback: calculate seconds and use epoch
+      SECONDS_AGO=$((WINDOW_MINUTES * 60))
+      START_EPOCH=$(($(date -u +%s) - SECONDS_AGO))
+      START_TIME=$(date -u -d "@${START_EPOCH}" +"%Y-%m-%dT%H:%M:%S" 2>/dev/null || date -u -r "${START_EPOCH}" +"%Y-%m-%dT%H:%M:%S" 2>/dev/null || echo "")
+    fi
+    
+    if [ -n "$END_TIME" ] && [ -n "$START_TIME" ]; then
+      log "Collecting CloudWatch metrics for NAT gateways (last ${WINDOW_MINUTES} minutes)..."
+      
+      NAT_INDEX=0
+      while [ "$NAT_INDEX" -lt "$NAT_COUNT" ]; do
+        NAT_ID=$(jq -r ".[$NAT_INDEX][0] // \"\"" "$OUT/nat_gateways.json" 2>/dev/null || echo "")
+        if [ -n "$NAT_ID" ] && [ "$NAT_ID" != "null" ] && [ "$NAT_ID" != "" ]; then
+          # Get metrics for this NAT gateway
+          # ActiveConnectionCount - current active connections (indicator of SNAT port usage)
+          # BytesInFromDestination - inbound traffic
+          # BytesOutToDestination - outbound traffic
+          
+          METRICS_FILE="$OUT/nat_${NAT_ID}_metrics.json"
+          
+          if [ -n "${REGION:-}" ]; then
+            aws cloudwatch get-metric-statistics --region "$REGION" \
+              --namespace AWS/NATGateway \
+              --metric-name ActiveConnectionCount \
+              --dimensions Name=NatGatewayId,Value="$NAT_ID" \
+              --start-time "$START_TIME" \
+              --end-time "$END_TIME" \
+              --period 300 \
+              --statistics Maximum \
+              --statistics Average \
+              --output json > "$METRICS_FILE" 2>/dev/null || echo "{}" > "$METRICS_FILE"
+          else
+            aws cloudwatch get-metric-statistics \
+              --namespace AWS/NATGateway \
+              --metric-name ActiveConnectionCount \
+              --dimensions Name=NatGatewayId,Value="$NAT_ID" \
+              --start-time "$START_TIME" \
+              --end-time "$END_TIME" \
+              --period 300 \
+              --statistics Maximum \
+              --statistics Average \
+              --output json > "$METRICS_FILE" 2>/dev/null || echo "{}" > "$METRICS_FILE"
+          fi
+          
+          # Check if we got valid metrics
+          METRIC_COUNT=$(jq -r '.Datapoints | length' "$METRICS_FILE" 2>/dev/null || echo "0")
+          if [ "$METRIC_COUNT" != "0" ] && [ "$METRIC_COUNT" != "null" ]; then
+            log "Collected metrics for NAT gateway $NAT_ID ($METRIC_COUNT data points)"
+          fi
+        fi
+        NAT_INDEX=$((NAT_INDEX + 1))
+      done
+    else
+      warn "Cannot determine time range for CloudWatch metrics (date command issue)"
+    fi
+  else
+    log "No NAT gateways found in VPC (may use Internet Gateway or no internet access)"
+    echo "[]" > "$OUT/nat_gateways.json"
+  fi
+else
+  echo "[]" > "$OUT/nat_gateways.json"
+  if [ -z "$VPC" ]; then
+    warn "VPC ID not available, skipping NAT gateway collection"
+  elif [ -z "$REGION" ]; then
+    warn "Region not available, skipping NAT gateway CloudWatch metrics"
+  fi
+fi
+
 log "Done. Output directory: $OUT"

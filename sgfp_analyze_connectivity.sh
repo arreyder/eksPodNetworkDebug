@@ -1792,6 +1792,97 @@ if [ -s "$POD_DIR/pod_conditions.json" ]; then
 fi
 
 echo ""
+echo "=== NAT Gateway SNAT Port Exhaustion Analysis ==="
+
+# Check NAT gateway SNAT port usage
+# NAT gateways have a limit of ~55,000 concurrent connections per gateway
+# ActiveConnectionCount metric indicates current SNAT port usage
+if [ -n "$AWS_DIR" ] && [ -s "$AWS_DIR/nat_gateways.json" ]; then
+  NAT_COUNT=$(jq -r 'length' "$AWS_DIR/nat_gateways.json" 2>/dev/null | tr -d '[:space:]' || echo "0")
+  
+  if [ "$NAT_COUNT" = "0" ] || [ -z "$NAT_COUNT" ]; then
+    echo "[INFO] No NAT gateways found in VPC (may use Internet Gateway or no internet access)"
+  else
+    echo "[INFO] Found $NAT_COUNT NAT gateway(s) in VPC"
+    
+    NAT_ISSUES=0
+    NAT_INDEX=0
+    
+    # NAT gateway connection limit: ~55,000 concurrent connections
+    NAT_CONNECTION_LIMIT=55000
+    NAT_WARNING_THRESHOLD=45000  # Warn at 80% of limit
+    
+    while [ "$NAT_INDEX" -lt "$NAT_COUNT" ]; do
+      NAT_ID=$(jq -r ".[$NAT_INDEX][0] // \"\"" "$AWS_DIR/nat_gateways.json" 2>/dev/null || echo "")
+      NAT_SUBNET=$(jq -r ".[$NAT_INDEX][1] // \"\"" "$AWS_DIR/nat_gateways.json" 2>/dev/null || echo "")
+      NAT_STATE=$(jq -r ".[$NAT_INDEX][2] // \"\"" "$AWS_DIR/nat_gateways.json" 2>/dev/null || echo "")
+      NAT_PUBLIC_IP=$(jq -r ".[$NAT_INDEX][3] // \"\"" "$AWS_DIR/nat_gateways.json" 2>/dev/null || echo "")
+      
+      if [ -n "$NAT_ID" ] && [ "$NAT_ID" != "null" ] && [ "$NAT_ID" != "" ]; then
+        echo "[INFO] NAT Gateway: $NAT_ID (Subnet: $NAT_SUBNET, State: $NAT_STATE)"
+        
+        # Check CloudWatch metrics
+        METRICS_FILE="$AWS_DIR/nat_${NAT_ID}_metrics.json"
+        if [ -s "$METRICS_FILE" ]; then
+          # Get maximum and average ActiveConnectionCount
+          # CloudWatch may return Maximum and Average in separate datapoints or together
+          MAX_CONNECTIONS=$(jq -r '[.Datapoints[]? | select(.Maximum != null) | .Maximum] | if length > 0 then max else 0 end' "$METRICS_FILE" 2>/dev/null || echo "0")
+          AVG_CONNECTIONS=$(jq -r '[.Datapoints[]? | select(.Average != null) | .Average] | if length > 0 then (add / length) else 0 end' "$METRICS_FILE" 2>/dev/null || echo "0")
+          
+          # If Maximum is not available, use the maximum of all Average values as a proxy
+          if [ "$MAX_CONNECTIONS" = "0" ] || [ "$MAX_CONNECTIONS" = "null" ] || [ -z "$MAX_CONNECTIONS" ]; then
+            MAX_CONNECTIONS=$(jq -r '[.Datapoints[]? | select(.Average != null) | .Average] | if length > 0 then max else 0 end' "$METRICS_FILE" 2>/dev/null || echo "0")
+          fi
+          
+          # Convert to integers (remove decimals)
+          MAX_CONNECTIONS_INT=$(echo "$MAX_CONNECTIONS" | cut -d. -f1 2>/dev/null || echo "0")
+          AVG_CONNECTIONS_INT=$(echo "$AVG_CONNECTIONS" | cut -d. -f1 2>/dev/null || echo "0")
+          
+          if [ "$MAX_CONNECTIONS_INT" != "0" ] && [ "$MAX_CONNECTIONS_INT" != "" ] && [ "$MAX_CONNECTIONS_INT" != "null" ]; then
+            echo "  - Maximum active connections: $MAX_CONNECTIONS_INT"
+            
+            if [ "$MAX_CONNECTIONS_INT" -ge "$NAT_CONNECTION_LIMIT" ]; then
+              echo "  - [ISSUE] NAT gateway at connection limit ($MAX_CONNECTIONS_INT / $NAT_CONNECTION_LIMIT) - SNAT port exhaustion likely"
+              issues=$((issues+1))
+              NAT_ISSUES=1
+            elif [ "$MAX_CONNECTIONS_INT" -ge "$NAT_WARNING_THRESHOLD" ]; then
+              echo "  - [WARN] NAT gateway approaching connection limit ($MAX_CONNECTIONS_INT / $NAT_CONNECTION_LIMIT, ~$((MAX_CONNECTIONS_INT * 100 / NAT_CONNECTION_LIMIT))%) - may experience SNAT port exhaustion"
+              warnings=$((warnings+1))
+              NAT_ISSUES=1
+            else
+              USAGE_PCT=$((MAX_CONNECTIONS_INT * 100 / NAT_CONNECTION_LIMIT))
+              echo "  - [OK] Connection usage: ~$USAGE_PCT% of limit"
+            fi
+            
+            if [ "$AVG_CONNECTIONS_INT" != "0" ] && [ "$AVG_CONNECTIONS_INT" != "" ] && [ "$AVG_CONNECTIONS_INT" != "null" ]; then
+              echo "  - Average active connections: $AVG_CONNECTIONS_INT"
+            fi
+          else
+            echo "  - [INFO] No connection metrics available (may need CloudWatch permissions or no data in time window)"
+          fi
+        else
+          echo "  - [INFO] CloudWatch metrics not available (may need cloudwatch:GetMetricStatistics permission)"
+        fi
+      fi
+      
+      NAT_INDEX=$((NAT_INDEX + 1))
+    done
+    
+    if [ "$NAT_ISSUES" -eq 0 ]; then
+      echo "[OK] No NAT gateway SNAT port exhaustion issues detected"
+    else
+      echo "[INFO] Recommendation: If experiencing SNAT port exhaustion, consider:"
+      echo "  - Adding more NAT gateways (distribute traffic across multiple gateways)"
+      echo "  - Using VPC endpoints for AWS services (reduces NAT gateway traffic)"
+      echo "  - Implementing connection pooling/reuse in applications"
+      echo "  - Using private endpoints for external services"
+    fi
+  fi
+else
+  echo "[INFO] NAT gateway data not available (may need AWS API access or VPC may not use NAT gateways)"
+fi
+
+echo ""
 echo "=== CloudTrail API Diagnostics ==="
 
 # Try to find API diagnostics directory (same parent as bundle)

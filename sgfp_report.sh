@@ -1686,6 +1686,78 @@ if [ -n "$AWS_DIR" ]; then
   fi
 fi
 
+# NAT Gateway SNAT Port Exhaustion
+if [ -n "$AWS_DIR" ] && [ -s "$AWS_DIR/nat_gateways.json" ]; then
+  echo >> "$REPORT"
+  echo "## NAT Gateway SNAT Port Exhaustion" >> "$REPORT"
+  
+  NAT_COUNT=$(jq -r 'length' "$AWS_DIR/nat_gateways.json" 2>/dev/null | tr -d '[:space:]' || echo "0")
+  
+  if [ "$NAT_COUNT" = "0" ] || [ -z "$NAT_COUNT" ]; then
+    say "[INFO] No NAT gateways found in VPC (may use Internet Gateway or no internet access)"
+  else
+    say "[INFO] Found $NAT_COUNT NAT gateway(s) in VPC"
+    
+    NAT_CONNECTION_LIMIT=55000
+    NAT_WARNING_THRESHOLD=45000
+    
+    NAT_INDEX=0
+    while [ "$NAT_INDEX" -lt "$NAT_COUNT" ]; do
+      NAT_ID=$(jq -r ".[$NAT_INDEX][0] // \"\"" "$AWS_DIR/nat_gateways.json" 2>/dev/null || echo "")
+      NAT_SUBNET=$(jq -r ".[$NAT_INDEX][1] // \"\"" "$AWS_DIR/nat_gateways.json" 2>/dev/null || echo "")
+      NAT_STATE=$(jq -r ".[$NAT_INDEX][2] // \"\"" "$AWS_DIR/nat_gateways.json" 2>/dev/null || echo "")
+      
+      if [ -n "$NAT_ID" ] && [ "$NAT_ID" != "null" ] && [ "$NAT_ID" != "" ]; then
+        say "[INFO] NAT Gateway: $NAT_ID (Subnet: $NAT_SUBNET, State: $NAT_STATE)"
+        
+        # Check CloudWatch metrics
+        METRICS_FILE="$AWS_DIR/nat_${NAT_ID}_metrics.json"
+        if [ -s "$METRICS_FILE" ]; then
+          # CloudWatch may return Maximum and Average in separate datapoints or together
+          MAX_CONNECTIONS=$(jq -r '[.Datapoints[]? | select(.Maximum != null) | .Maximum] | if length > 0 then max else 0 end' "$METRICS_FILE" 2>/dev/null || echo "0")
+          AVG_CONNECTIONS=$(jq -r '[.Datapoints[]? | select(.Average != null) | .Average] | if length > 0 then (add / length) else 0 end' "$METRICS_FILE" 2>/dev/null || echo "0")
+          
+          # If Maximum is not available, use the maximum of all Average values as a proxy
+          if [ "$MAX_CONNECTIONS" = "0" ] || [ "$MAX_CONNECTIONS" = "null" ] || [ -z "$MAX_CONNECTIONS" ]; then
+            MAX_CONNECTIONS=$(jq -r '[.Datapoints[]? | select(.Average != null) | .Average] | if length > 0 then max else 0 end' "$METRICS_FILE" 2>/dev/null || echo "0")
+          fi
+          
+          MAX_CONNECTIONS_INT=$(echo "$MAX_CONNECTIONS" | cut -d. -f1 2>/dev/null || echo "0")
+          AVG_CONNECTIONS_INT=$(echo "$AVG_CONNECTIONS" | cut -d. -f1 2>/dev/null || echo "0")
+          
+          if [ "$MAX_CONNECTIONS_INT" != "0" ] && [ "$MAX_CONNECTIONS_INT" != "" ] && [ "$MAX_CONNECTIONS_INT" != "null" ]; then
+            say "  - Maximum active connections: $MAX_CONNECTIONS_INT"
+            
+            if [ "$MAX_CONNECTIONS_INT" -ge "$NAT_CONNECTION_LIMIT" ]; then
+              say "[ISSUE] NAT gateway at connection limit ($MAX_CONNECTIONS_INT / $NAT_CONNECTION_LIMIT) - SNAT port exhaustion likely"
+            elif [ "$MAX_CONNECTIONS_INT" -ge "$NAT_WARNING_THRESHOLD" ]; then
+              USAGE_PCT=$((MAX_CONNECTIONS_INT * 100 / NAT_CONNECTION_LIMIT))
+              say "[WARN] NAT gateway approaching connection limit ($MAX_CONNECTIONS_INT / $NAT_CONNECTION_LIMIT, ~$USAGE_PCT%) - may experience SNAT port exhaustion"
+            else
+              USAGE_PCT=$((MAX_CONNECTIONS_INT * 100 / NAT_CONNECTION_LIMIT))
+              say "[OK] Connection usage: ~$USAGE_PCT% of limit"
+            fi
+            
+            if [ "$AVG_CONNECTIONS_INT" != "0" ] && [ "$AVG_CONNECTIONS_INT" != "" ] && [ "$AVG_CONNECTIONS_INT" != "null" ]; then
+              say "  - Average active connections: $AVG_CONNECTIONS_INT"
+            fi
+          else
+            say "[INFO] No connection metrics available (may need CloudWatch permissions or no data in time window)"
+          fi
+        else
+          say "[INFO] CloudWatch metrics not available (may need cloudwatch:GetMetricStatistics permission)"
+          say "  - Metrics file: \`aws_*/nat_${NAT_ID}_metrics.json\`"
+        fi
+      fi
+      
+      NAT_INDEX=$((NAT_INDEX + 1))
+    done
+    
+    say "  - NAT gateway data: \`aws_*/nat_gateways.json\`"
+    say "  - Full analysis in connectivity analysis output"
+  fi
+fi
+
 # AMI / CNI / Kernel Drift
 if [ -n "$NODE_DIR" ]; then
   echo >> "$REPORT"
