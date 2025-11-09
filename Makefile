@@ -1,5 +1,5 @@
 
-.PHONY: collect api report analyze doctor
+.PHONY: collect api report analyze doctor clean
 
 NS ?= default
 POD ?=
@@ -24,3 +24,8 @@ analyze:
 doctor:
 	@[ -n "$(POD)" ] || (echo "POD required: make doctor POD=<pod> [NS=default]"; exit 1)
 	./sgfp_doctor.sh $(POD) -n $(NS)
+
+clean:
+	@echo "Cleaning up diagnostic output directories..."
+	@rm -rf sgfp_bundle_*/ sgfp_diag_*/ sgfp_api_diag_*/
+	@echo "Done."
