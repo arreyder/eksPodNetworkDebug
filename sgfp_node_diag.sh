@@ -371,6 +371,62 @@ if [ -r /var/log/syslog ] || [ -r /host/var/log/syslog ]; then
   fi
 fi
 
+# Reverse path filtering (rp_filter) - important for pod ENI and asymmetric routing
+log "Collecting reverse path filtering (rp_filter) settings..."
+RP_FILTER_COLLECTED=0
+if [ -d /proc/sys/net/ipv4/conf ]; then
+  # Collect rp_filter for all interfaces
+  for iface_dir in /proc/sys/net/ipv4/conf/*; do
+    if [ -d "$iface_dir" ] && [ -r "$iface_dir/rp_filter" ]; then
+      iface_name=$(basename "$iface_dir")
+      rp_value=$(cat "$iface_dir/rp_filter" 2>/dev/null | tr -d '[:space:]' || echo "")
+      if [ -n "$rp_value" ]; then
+        echo "$iface_name=$rp_value" >> "$OUT/node_rp_filter.txt" 2>/dev/null || true
+        RP_FILTER_COLLECTED=1
+      fi
+    fi
+  done
+  if [ "$RP_FILTER_COLLECTED" -eq 1 ]; then
+    log "Collected rp_filter settings"
+  else
+    echo "" > "$OUT/node_rp_filter.txt"
+  fi
+elif [ -d /host/proc/sys/net/ipv4/conf ]; then
+  # Try via /host mount (for temporary debug pods)
+  for iface_dir in /host/proc/sys/net/ipv4/conf/*; do
+    if [ -d "$iface_dir" ] && [ -r "$iface_dir/rp_filter" ]; then
+      iface_name=$(basename "$iface_dir")
+      rp_value=$(cat "$iface_dir/rp_filter" 2>/dev/null | tr -d '[:space:]' || echo "")
+      if [ -n "$rp_value" ]; then
+        echo "$iface_name=$rp_value" >> "$OUT/node_rp_filter.txt" 2>/dev/null || true
+        RP_FILTER_COLLECTED=1
+      fi
+    fi
+  done
+  if [ "$RP_FILTER_COLLECTED" -eq 1 ]; then
+    log "Collected rp_filter settings (via /host mount)"
+  else
+    echo "" > "$OUT/node_rp_filter.txt"
+  fi
+else
+  echo "" > "$OUT/node_rp_filter.txt"
+fi
+
+# Try to collect rp_filter via temporary pod if direct access didn't work
+if [ "$RP_FILTER_COLLECTED" -eq 0 ] && [ "${TEMP_POD_AVAILABLE:-0}" = "1" ] && [ -n "${TEMP_POD_NAME:-}" ] && command -v kubectl >/dev/null 2>&1; then
+  log "Collecting rp_filter settings via temporary pod..."
+  if kubectl exec "$TEMP_POD_NAME" -- sh -c "for iface_dir in /host/proc/sys/net/ipv4/conf/*; do if [ -d \"\$iface_dir\" ] && [ -r \"\$iface_dir/rp_filter\" ]; then iface_name=\$(basename \"\$iface_dir\"); rp_value=\$(cat \"\$iface_dir/rp_filter\" 2>/dev/null | tr -d '[:space:]' || echo ''); if [ -n \"\$rp_value\" ]; then echo \"\$iface_name=\$rp_value\"; fi; fi; done" > "$OUT/node_rp_filter.txt" 2>/dev/null; then
+    if [ -s "$OUT/node_rp_filter.txt" ]; then
+      RP_FILTER_COLLECTED=1
+      log "Collected rp_filter settings via temporary pod"
+    else
+      echo "" > "$OUT/node_rp_filter.txt"
+    fi
+  else
+    echo "" > "$OUT/node_rp_filter.txt"
+  fi
+fi
+
 # Network namespace analysis (stuck/orphaned namespaces)
 log "Analyzing network namespaces for leaks..."
 # Try both direct access and via /host mount (for temporary debug pods)

@@ -621,6 +621,102 @@ if [ -n "$NODE_DIR" ]; then
   fi
 fi
 
+# Reverse path filtering (rp_filter) analysis
+if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_rp_filter.txt" ]; then
+  echo ""
+  echo "=== Reverse Path Filtering (rp_filter) ==="
+  
+  RP_FILTER_ISSUES=0
+  RP_FILTER_FILE="$NODE_DIR/node_rp_filter.txt"
+  
+  # rp_filter values:
+  # 0 = No source validation (disabled)
+  # 1 = Strict mode (RFC 3704) - recommended for most cases, but can break pod ENI
+  # 2 = Loose mode - recommended for pod ENI/custom networking to allow asymmetric routing
+  
+  # Check for interfaces with rp_filter=1 (strict mode) which can cause issues with pod ENIs
+  STRICT_MODE_COUNT=0
+  LOOSE_MODE_COUNT=0
+  DISABLED_COUNT=0
+  STRICT_IFACES=""
+  
+  while IFS='=' read -r iface rp_value; do
+    # Skip empty lines and comments
+    [ -z "$iface" ] && continue
+    [ "$iface" = "#" ] && continue
+    
+    rp_value=$(echo "$rp_value" | tr -d '[:space:]')
+    case "$rp_value" in
+      "1")
+        STRICT_MODE_COUNT=$((STRICT_MODE_COUNT + 1))
+        if [ -z "$STRICT_IFACES" ]; then
+          STRICT_IFACES="$iface"
+        else
+          STRICT_IFACES="$STRICT_IFACES, $iface"
+        fi
+        ;;
+      "2")
+        LOOSE_MODE_COUNT=$((LOOSE_MODE_COUNT + 1))
+        ;;
+      "0")
+        DISABLED_COUNT=$((DISABLED_COUNT + 1))
+        ;;
+    esac
+  done < "$RP_FILTER_FILE"
+  
+  # Check if pod uses pod ENI (branch ENI)
+  POD_USES_POD_ENI=0
+  if [ -s "$POD_DIR/pod_branch_eni_id.txt" ]; then
+    POD_ENI_ID=$(cat "$POD_DIR/pod_branch_eni_id.txt" 2>/dev/null | tr -d '[:space:]' || echo "")
+    if [ -n "$POD_ENI_ID" ] && [ "$POD_ENI_ID" != "unknown" ] && [ "$POD_ENI_ID" != "null" ]; then
+      POD_USES_POD_ENI=1
+    fi
+  fi
+  
+  if [ "$POD_USES_POD_ENI" -eq 1 ]; then
+    # For pod ENI scenarios, rp_filter=2 (loose mode) is recommended
+    if [ "$STRICT_MODE_COUNT" -gt 0 ]; then
+      echo "[ISSUE] Found $STRICT_MODE_COUNT interface(s) with rp_filter=1 (strict mode) - may cause asymmetric routing issues with pod ENI"
+      echo "[INFO] Interfaces with strict mode: $STRICT_IFACES"
+      echo "[INFO] Recommendation: Set rp_filter=2 (loose mode) for pod ENI scenarios to allow asymmetric routing"
+      issues=$((issues+1))
+      RP_FILTER_ISSUES=1
+    elif [ "$LOOSE_MODE_COUNT" -gt 0 ]; then
+      echo "[OK] Found $LOOSE_MODE_COUNT interface(s) with rp_filter=2 (loose mode) - appropriate for pod ENI"
+    else
+      # No loose mode found - check if disabled (0) or just not set
+      if [ "$DISABLED_COUNT" -gt 0 ]; then
+        echo "[ISSUE] Found $DISABLED_COUNT interface(s) with rp_filter=0 (disabled) - security risk AND may cause asymmetric routing issues with pod ENI"
+        echo "[INFO] Recommendation: Set rp_filter=2 (loose mode) for pod ENI scenarios to allow asymmetric routing and improve security"
+        issues=$((issues+1))
+        RP_FILTER_ISSUES=1
+      else
+        echo "[WARN] No interfaces found with rp_filter=2 (loose mode) - pod ENI may experience asymmetric routing issues"
+        warnings=$((warnings+1))
+        RP_FILTER_ISSUES=1
+      fi
+    fi
+  else
+    # For non-pod ENI scenarios, rp_filter=1 (strict mode) is typically fine
+    if [ "$STRICT_MODE_COUNT" -gt 0 ]; then
+      echo "[OK] Found $STRICT_MODE_COUNT interface(s) with rp_filter=1 (strict mode) - appropriate for standard networking"
+    elif [ "$LOOSE_MODE_COUNT" -gt 0 ]; then
+      echo "[INFO] Found $LOOSE_MODE_COUNT interface(s) with rp_filter=2 (loose mode) - allows asymmetric routing"
+    fi
+    
+    # Warn about disabled rp_filter (0) as it's a security risk (even for non-pod ENI)
+    if [ "$DISABLED_COUNT" -gt 0 ]; then
+      echo "[WARN] Found $DISABLED_COUNT interface(s) with rp_filter=0 (disabled) - security risk (allows source address spoofing)"
+      warnings=$((warnings+1))
+      RP_FILTER_ISSUES=1
+    fi
+  fi
+  
+  if [ "$RP_FILTER_ISSUES" -eq 0 ]; then
+    echo "[OK] No reverse path filtering issues detected"
+  fi
+fi
+
 echo ""
 echo "=== Readiness Gate Timing ==="
 
