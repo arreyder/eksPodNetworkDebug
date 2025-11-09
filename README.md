@@ -10,6 +10,7 @@ This toolkit collects comprehensive diagnostics for AWS EKS pods using Security 
 - **SG Details**: Shows Security Group IDs, names, and descriptions for easy identification
 - **Node Diagnostics**: Collects conntrack usage, interface error statistics, socket overruns, and AWS VPC CNI logs (automatically via temporary debug pod)
 - **CNI Log Analysis**: Automatically collects and analyzes CNI logs from `/var/log/aws-routed-eni/` including ipamd, plugin, network-policy-agent, and eBPF SDK logs
+- **iptables Rule Analysis**: Collects and analyzes iptables rules (filter and NAT tables), including pod-specific rule detection
 - **Connectivity Analysis**: Advanced analysis for pod connectivity issues after large churns, including ENI attachment timing, subnet IP availability, and CNI log errors
 - **AWS ENI State**: Captures trunk and branch ENI information, subnet IP availability
 - **API Diagnostics**: Analyzes CloudTrail events for ENI-related throttles and errors (with dry-run detection)
@@ -248,6 +249,11 @@ Generates a markdown report from the collected bundle.
   - Conntrack connections with direction labels (INBOUND/OUTBOUND)
   - Same-node vs cross-node vs external connection identification
   - Connection states (ESTABLISHED, CLOSE, TIME_WAIT, etc.)
+- **iptables Rules**:
+  - Shows iptables filter and NAT table summaries (chain and rule counts)
+  - **Pod-Specific Rule Detection**: Automatically searches for iptables rules matching the pod's IP address and veth interface
+  - Displays example rules when found (e.g., Kubernetes service DNAT rules)
+  - Notes when no pod-specific rules are found (may be normal if no network policies apply)
 - **Log Files Summary**: Concise list of all log files with error counts and file paths
 - **Node CNI Logs**: Shows CNI log errors with recent examples in the Node State section
 - **View Related Logs**: Provides helper script commands to view pod-specific log lines
