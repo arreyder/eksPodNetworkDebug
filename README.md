@@ -11,10 +11,10 @@ This toolkit collects comprehensive diagnostics for AWS EKS pods using Security 
 - **Node Diagnostics**: Collects conntrack usage, interface error statistics, socket overruns, and AWS VPC CNI logs (automatically via temporary debug pod)
 - **CNI Log Analysis**: Automatically collects and analyzes CNI logs from `/var/log/aws-routed-eni/` including ipamd, plugin, network-policy-agent, and eBPF SDK logs
 - **iptables Rule Analysis**: Collects and analyzes iptables rules (filter and NAT tables), including pod-specific rule detection
-- **Connectivity Analysis**: Advanced analysis for pod connectivity issues after large churns, including ENI attachment timing, subnet IP availability, and CNI log errors
+- **Connectivity Analysis**: Advanced analysis for pod connectivity issues after large churns, including ENI attachment timing, subnet IP availability, CNI log errors, and SYN_SENT connection detection (identifies pods trying to connect but waiting for ACK)
 - **AWS ENI State**: Captures trunk and branch ENI information, subnet IP availability
 - **API Diagnostics**: Analyzes CloudTrail events for ENI-related throttles and errors (with dry-run detection)
-- **Quick Status Check**: Fast validation script to check pod ENI status without full collection (includes optional network connections display)
+- **Quick Status Check**: Fast validation script to check pod ENI status without full collection (includes optional network connections display with SYN_SENT detection)
 - **Log Files Summary**: Report includes concise summary of all log files with error counts and file paths
 - **View Related Logs Helper**: Helper script to easily view pod-specific log lines from collected bundles
 - **Node Debug Pod**: Helper script to create debug pods on nodes (supports pod name or node name)
@@ -246,6 +246,8 @@ Generates a markdown report from the collected bundle.
 - Validates actual SGs against expected SGs (from annotations)
 - **Network Connections**:
   - Pod network connections (listening ports and established connections from pod's perspective)
+  - **SYN_SENT Detection**: Automatically detects and reports connections in SYN_SENT state (pod sending SYN but waiting for ACK - indicates connectivity issues)
+  - Shows destination IPs and ports that the pod is trying to connect to but cannot complete
   - Conntrack connections with direction labels (INBOUND/OUTBOUND)
   - Same-node vs cross-node vs external connection identification
   - Connection states (ESTABLISHED, CLOSE, TIME_WAIT, etc.)
@@ -345,6 +347,8 @@ Quick validation script for pod ENI status without full diagnostic collection.
 - Displays requested vs actual Security Groups with names and descriptions
 - **Network Connections** (with `--connections` or `-c` flag):
   - Pod network connections (listening ports and established connections from pod's perspective)
+  - **SYN_SENT Detection**: Automatically detects and warns about connections in SYN_SENT state (pod sending SYN but waiting for ACK - indicates connectivity issues)
+  - Shows destination IPs and ports that the pod is trying to connect to but cannot complete
   - Conntrack connections (node-level, filtered by pod IP) showing both inbound TO pod and outbound FROM pod
   - Inbound/outbound connection counts
   - Same-node vs cross-node vs external connection identification

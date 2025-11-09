@@ -196,10 +196,11 @@ if [ -s "$POD_CONNECTIONS" ]; then
     # Check if this is /proc/net/tcp format (hex addresses) or ss/netstat format
     if grep -qE "^[[:space:]]*[0-9]+:[[:space:]]+[0-9A-F]{8}:" "$POD_CONNECTIONS" 2>/dev/null; then
       # /proc/net/tcp format - parse hex addresses
-      # State 0A = LISTEN (10), 01 = ESTABLISHED (1)
+      # State 0A = LISTEN (10), 01 = ESTABLISHED (1), 02 = SYN_SENT (2)
       # Skip header lines (sl, local_address, etc.) and section headers (--- TCP connections ---)
-      LISTEN_COUNT=$(grep -E "^[[:space:]]*[0-9]+:[[:space:]]+[0-9A-F]{8}:" "$POD_CONNECTIONS" 2>/dev/null | grep -v "^---" | awk '{print $4}' | grep -cE "^0A$|^0a$" || echo "0")
-      ESTAB_COUNT=$(grep -E "^[[:space:]]*[0-9]+:[[:space:]]+[0-9A-F]{8}:" "$POD_CONNECTIONS" 2>/dev/null | grep -v "^---" | awk '{print $4}' | grep -cE "^01$" || echo "0")
+      LISTEN_COUNT=$(grep -E "^[[:space:]]*[0-9]+:[[:space:]]+[0-9A-F]{8}:" "$POD_CONNECTIONS" 2>/dev/null | grep -v "^---" | awk '{print $4}' | grep -cE "^0A$|^0a$" | tr -d '[:space:]' || echo "0")
+      ESTAB_COUNT=$(grep -E "^[[:space:]]*[0-9]+:[[:space:]]+[0-9A-F]{8}:" "$POD_CONNECTIONS" 2>/dev/null | grep -v "^---" | awk '{print $4}' | grep -cE "^01$" | tr -d '[:space:]' || echo "0")
+      SYN_SENT_COUNT=$(grep -E "^[[:space:]]*[0-9]+:[[:space:]]+[0-9A-F]{8}:" "$POD_CONNECTIONS" 2>/dev/null | grep -v "^---" | awk '{print $4}' | grep -cE "^02$" | tr -d '[:space:]' || echo "0")
       
       if [ "$LISTEN_COUNT" != "0" ] || [ "$ESTAB_COUNT" != "0" ]; then
         say "[INFO] Listening ports: $LISTEN_COUNT | Established connections: $ESTAB_COUNT"
@@ -274,10 +275,50 @@ if [ -s "$POD_CONNECTIONS" ]; then
       else
         say "[INFO] No active connections detected"
       fi
+      
+      # Check for SYN_SENT connections (pod trying to connect but waiting for ACK)
+      # Only show if count is greater than 0 (handle numeric comparison)
+      if [ -n "$SYN_SENT_COUNT" ] && [ "$SYN_SENT_COUNT" != "0" ] && [ "$SYN_SENT_COUNT" -gt 0 ] 2>/dev/null; then
+        echo >> "$REPORT"
+        say "[ISSUE] Found $SYN_SENT_COUNT connection(s) in SYN_SENT state (pod sending SYN but waiting for ACK - potential connectivity issue)"
+        SYN_SENT_TMP=$(mktemp)
+        # Filter for lines with state 02 (SYN_SENT)
+        grep -E "^[[:space:]]*[0-9]+:[[:space:]]+[0-9A-F]{8}:" "$POD_CONNECTIONS" 2>/dev/null | grep -v "^---" | awk '$4 == "02" || $4 == "2"' | while read line; do
+          LOCAL_HEX=$(echo "$line" | awk '{print $2}' | cut -d: -f1)
+          LOCAL_PORT_HEX=$(echo "$line" | awk '{print $2}' | cut -d: -f2)
+          REMOTE_HEX=$(echo "$line" | awk '{print $3}' | cut -d: -f1)
+          REMOTE_PORT_HEX=$(echo "$line" | awk '{print $3}' | cut -d: -f2)
+          
+          if [ ${#LOCAL_HEX} -eq 8 ]; then
+            LOCAL_IP=$(printf "%d.%d.%d.%d" 0x${LOCAL_HEX:6:2} 0x${LOCAL_HEX:4:2} 0x${LOCAL_HEX:2:2} 0x${LOCAL_HEX:0:2} 2>/dev/null || echo "unknown")
+          else
+            LOCAL_IP="unknown"
+          fi
+          LOCAL_PORT=$(printf "%d" 0x$LOCAL_PORT_HEX 2>/dev/null || echo "unknown")
+          if [ ${#REMOTE_HEX} -eq 8 ]; then
+            REMOTE_IP=$(printf "%d.%d.%d.%d" 0x${REMOTE_HEX:6:2} 0x${REMOTE_HEX:4:2} 0x${REMOTE_HEX:2:2} 0x${REMOTE_HEX:0:2} 2>/dev/null || echo "unknown")
+          else
+            REMOTE_IP="unknown"
+          fi
+          REMOTE_PORT=$(printf "%d" 0x$REMOTE_PORT_HEX 2>/dev/null || echo "unknown")
+          
+          if [ "$REMOTE_IP" != "unknown" ] && [ "$REMOTE_PORT" != "unknown" ]; then
+            # Determine connection type
+            if echo "$REMOTE_IP" | grep -qE "^10\.|^172\.(1[6-9]|2[0-9]|3[01])\.|^192\.168\."; then
+              echo "  - $LOCAL_IP:$LOCAL_PORT -> $REMOTE_IP:$REMOTE_PORT (VPC/internal - cannot connect)" >> "$SYN_SENT_TMP"
+            else
+              echo "  - $LOCAL_IP:$LOCAL_PORT -> $REMOTE_IP:$REMOTE_PORT (external - cannot connect)" >> "$SYN_SENT_TMP"
+            fi
+          fi
+        done
+        [ -s "$SYN_SENT_TMP" ] && cat "$SYN_SENT_TMP" >> "$REPORT" 2>/dev/null || true
+        rm -f "$SYN_SENT_TMP" 2>/dev/null || true
+      fi
     else
       # ss or netstat format
       LISTEN_COUNT=$(grep -iE "listen|0\.0\.0\.0|:::" "$POD_CONNECTIONS" 2>/dev/null | grep -v "^---" | wc -l | tr -d '[:space:]' || echo "0")
       ESTAB_COUNT=$(grep -iE "established|estab" "$POD_CONNECTIONS" 2>/dev/null | grep -v "^---" | wc -l | tr -d '[:space:]' || echo "0")
+      SYN_SENT_COUNT=$(grep -iE "syn-sent|syn_sent" "$POD_CONNECTIONS" 2>/dev/null | grep -v "^---" | wc -l | tr -d '[:space:]' || echo "0")
       
       if [ "$LISTEN_COUNT" != "0" ] || [ "$ESTAB_COUNT" != "0" ]; then
         say "[INFO] Listening ports: $LISTEN_COUNT | Established connections: $ESTAB_COUNT"
@@ -289,6 +330,14 @@ if [ -s "$POD_CONNECTIONS" ]; then
         fi
       else
         say "[INFO] No active connections detected"
+      fi
+      
+      # Check for SYN_SENT connections (ss/netstat format)
+      # Only show if count is greater than 0 (handle numeric comparison)
+      if [ -n "$SYN_SENT_COUNT" ] && [ "$SYN_SENT_COUNT" != "0" ] && [ "$SYN_SENT_COUNT" -gt 0 ] 2>/dev/null; then
+        echo >> "$REPORT"
+        say "[ISSUE] Found $SYN_SENT_COUNT connection(s) in SYN_SENT state (pod sending SYN but waiting for ACK - potential connectivity issue)"
+        grep -iE "syn-sent|syn_sent" "$POD_CONNECTIONS" 2>/dev/null | grep -v "^---" | sed 's/^/  - /' >> "$REPORT" 2>/dev/null || true
       fi
     fi
   fi
