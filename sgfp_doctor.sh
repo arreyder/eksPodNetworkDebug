@@ -28,7 +28,7 @@ done
 need(){ command -v "$1" >/dev/null 2>&1 || { echo "[DOCTOR] ERROR: Missing dependency: $1"; exit 1; }; }
 need kubectl; need jq; need awk; need grep
 
-echo "[DOCTOR] [1/5] Collecting diagnostics for pod '$POD' in ns '$NS'..."
+echo "[DOCTOR] [1/6] Collecting diagnostics for pod '$POD' in ns '$NS'..."
 if ! ./sgfp_collect.sh -n "$NS" "$POD" 2>&1; then
   echo "[DOCTOR] WARN: Collection had errors, but continuing..." >&2
 fi
@@ -39,31 +39,36 @@ echo "[DOCTOR] Bundle: $BUNDLE_DIR"
 if [ -n "$API_DIR" ]; then
   [ -d "$API_DIR" ] || { echo "[DOCTOR] ERROR: --api-dir not found: $API_DIR"; exit 1; }
   API_USED_DIR="$API_DIR"
-  echo "[DOCTOR] [2/5] Using provided API diag: $API_USED_DIR"
+  echo "[DOCTOR] [2/6] Using provided API diag: $API_USED_DIR"
 elif [ "$SKIP_API" -eq 1 ]; then
-  echo "[DOCTOR] [2/5] Skipping API diagnostics."
+  echo "[DOCTOR] [2/6] Skipping API diagnostics."
   API_USED_DIR="$(ls -dt sgfp_api_diag_* 2>/dev/null | head -1 || true)"
 else
-  echo "[DOCTOR] [2/5] Running API diagnostics (window: ${MINUTES}m$( [ -n "$REGION" ] && printf ", region: %s" "$REGION"))..."
+  echo "[DOCTOR] [2/6] Running API diagnostics (window: ${MINUTES}m$( [ -n "$REGION" ] && printf ", region: %s" "$REGION"))..."
   if [ -n "$REGION" ]; then WINDOW_MINUTES="$MINUTES" AWS_REGION="$REGION" ./sgfp_api_diag.sh >/dev/null || true
   else WINDOW_MINUTES="$MINUTES" ./sgfp_api_diag.sh >/dev/null || true; fi
   API_USED_DIR="$(ls -dt sgfp_api_diag_* 2>/dev/null | head -1 || true)"
   [ -n "$API_USED_DIR" ] && echo "[DOCTOR] API diag: $API_USED_DIR"
 fi
 
-echo "[DOCTOR] [3/5] Generating report..."
+echo "[DOCTOR] [3/6] Generating report..."
 if ! ./sgfp_report.sh "$BUNDLE_DIR" 2>&1; then
   echo "[DOCTOR] WARN: Report generation had errors" >&2
 fi
 REPORT_FILE="$BUNDLE_DIR/report.md"
 [ -f "$REPORT_FILE" ] || echo "[DOCTOR] WARN: Report file not found" >&2
 
-echo "[DOCTOR] [4/5] Running analysis..."
+echo "[DOCTOR] [4/6] Running analysis..."
 if ! ./sgfp_post_analyze.sh "$BUNDLE_DIR" 2>&1; then
   echo "[DOCTOR] WARN: Analysis had errors" >&2
 fi
 
-echo "[DOCTOR] [5/5] Displaying report..."
+echo "[DOCTOR] [5/6] Running connectivity analysis..."
+if ! ./sgfp_analyze_connectivity.sh "$BUNDLE_DIR" 2>&1; then
+  echo "[DOCTOR] WARN: Connectivity analysis had errors" >&2
+fi
+
+echo "[DOCTOR] [6/6] Displaying report..."
 if [ -f "$REPORT_FILE" ]; then
   echo
   cat "$REPORT_FILE"

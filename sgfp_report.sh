@@ -264,6 +264,41 @@ if [ -s "$POD_SNMP" ]; then
   fi
 fi
 
+# Node CNI logs (from /var/log/aws-routed-eni/)
+NODE_CNI_LOGS_DIR=""
+if [ -n "$NODE_DIR" ] && [ -d "$NODE_DIR/cni_logs" ]; then
+  NODE_CNI_LOGS_DIR="$NODE_DIR/cni_logs"
+fi
+
+if [ -n "$NODE_CNI_LOGS_DIR" ] && [ -d "$NODE_CNI_LOGS_DIR" ]; then
+  echo >> "$REPORT"
+  say "[INFO] Node CNI logs (from /var/log/aws-routed-eni/):"
+  CNI_ERRORS_FOUND=0
+  
+  for ERROR_FILE in "$NODE_CNI_LOGS_DIR"/*.errors; do
+    if [ -f "$ERROR_FILE" ] && [ -s "$ERROR_FILE" ]; then
+      LOG_NAME=$(basename "$ERROR_FILE" .errors)
+      ERROR_COUNT=$(wc -l < "$ERROR_FILE" 2>/dev/null | tr -d '[:space:]' || echo "0")
+      if [ "$ERROR_COUNT" -gt 0 ]; then
+        say "[ISSUE] $LOG_NAME: $ERROR_COUNT error/warning line(s)"
+        CNI_ERRORS_FOUND=$((CNI_ERRORS_FOUND + 1))
+        # Show recent errors
+        tail -3 "$ERROR_FILE" | sed 's/^/    /' >> "$REPORT" 2>/dev/null || true
+      fi
+    fi
+  done
+  
+  if [ "$CNI_ERRORS_FOUND" -eq 0 ]; then
+    say "[OK] No errors found in node CNI logs"
+  fi
+  
+  # List available log files
+  LOG_FILES=$(ls -1 "$NODE_CNI_LOGS_DIR"/*.log 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+  if [ "$LOG_FILES" -gt 0 ]; then
+    say "[INFO] Collected $LOG_FILES CNI log file(s) (see node diagnostics for full logs)"
+  fi
+fi
+
 echo >> "$REPORT"
 echo "## AWS ENI State" >> "$REPORT"
 

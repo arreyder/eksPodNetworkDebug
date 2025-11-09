@@ -79,6 +79,24 @@ else
   echo "{}" > "$OUT/trunk_eni.json"
 fi
 
+# Get subnet information for IP availability analysis
+if [ -n "$VPC" ]; then
+  log "Collecting subnet information..."
+  if [ -n "${REGION:-}" ]; then
+    aws ec2 describe-subnets --region "$REGION" \
+      --filters "Name=vpc-id,Values=$VPC" \
+      --query 'Subnets[].[SubnetId,AvailableIpAddressCount,CidrBlock,AvailabilityZone]' \
+      --output json > "$OUT/subnets.json" 2>/dev/null || echo "[]" > "$OUT/subnets.json"
+  else
+    aws ec2 describe-subnets \
+      --filters "Name=vpc-id,Values=$VPC" \
+      --query 'Subnets[].[SubnetId,AvailableIpAddressCount,CidrBlock,AvailabilityZone]' \
+      --output json > "$OUT/subnets.json" 2>/dev/null || echo "[]" > "$OUT/subnets.json"
+  fi
+  SUBNET_COUNT=$(jq -r 'length' "$OUT/subnets.json" 2>/dev/null || echo 0)
+  log "Found $SUBNET_COUNT subnet(s) in VPC"
+fi
+
 # Best-effort scan for branch ENIs in VPC (may require perms; may be large)
 if [ -n "$VPC" ]; then
   log "Scanning VPC for branch ENIs (this may take a moment)..."

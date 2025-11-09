@@ -8,8 +8,19 @@ mkdir -p "$OUT"
 
 # 1) Basic pod state
 kubectl -n "$NS" get pod "$POD" -o wide > "$OUT/pod_wide.txt" 2>/dev/null || true
+kubectl -n "$NS" get pod "$POD" -o json > "$OUT/pod_full.json" 2>/dev/null || echo '{}' > "$OUT/pod_full.json"
 kubectl -n "$NS" get pod "$POD" -o json | jq '.metadata.annotations' > "$OUT/pod_annotations.json" 2>/dev/null || echo '{}' > "$OUT/pod_annotations.json"
 kubectl -n "$NS" get pod "$POD" -o json | jq '.status.conditions'    > "$OUT/pod_conditions.json" 2>/dev/null || echo '[]' > "$OUT/pod_conditions.json"
+kubectl -n "$NS" get pod "$POD" -o json | jq '.status.containerStatuses' > "$OUT/pod_container_statuses.json" 2>/dev/null || echo '[]' > "$OUT/pod_container_statuses.json"
+
+# Pod events (for network-related issues)
+kubectl -n "$NS" get events --field-selector involvedObject.name="$POD" --sort-by='.lastTimestamp' > "$OUT/pod_events.txt" 2>/dev/null || echo "" > "$OUT/pod_events.txt"
+
+# Pod timing information
+POD_CREATED=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null || echo "")
+POD_STARTED=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.startTime}' 2>/dev/null || echo "")
+echo "CREATED=$POD_CREATED" > "$OUT/pod_timing.txt"
+echo "STARTED=$POD_STARTED" >> "$OUT/pod_timing.txt"
 
 POD_IP=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.podIP}' 2>/dev/null || echo "")
 NODE=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.spec.nodeName}' 2>/dev/null || echo "")
@@ -131,13 +142,27 @@ if [ -n "${AWS_NODE_POD:-}" ]; then
   if [ -z "$AWS_NODE_SHELL" ]; then
     AWS_NODE_SHELL="sh"  # fallback
   fi
+  # IPAMD introspection endpoints
   kubectl -n kube-system exec "$AWS_NODE_POD" -c aws-node -- \
     "$AWS_NODE_SHELL" -c 'curl -s 127.0.0.1:61678/v1/enis 2>/dev/null || true' \
     > "$OUT/ipamd_introspection.json" 2>/dev/null || echo '{}' > "$OUT/ipamd_introspection.json"
-  kubectl -n kube-system logs "$AWS_NODE_POD" -c aws-node --since=30m > "$OUT/aws_node_full.log" 2>/dev/null || true
+  kubectl -n kube-system exec "$AWS_NODE_POD" -c aws-node -- \
+    "$AWS_NODE_SHELL" -c 'curl -s 127.0.0.1:61678/v1/ipam-pool 2>/dev/null || true' \
+    > "$OUT/ipamd_pool.json" 2>/dev/null || echo '{}' > "$OUT/ipamd_pool.json"
+  kubectl -n kube-system exec "$AWS_NODE_POD" -c aws-node -- \
+    "$AWS_NODE_SHELL" -c 'curl -s 127.0.0.1:61678/v1/networkutils-env 2>/dev/null || true' \
+    > "$OUT/ipamd_networkutils.json" 2>/dev/null || echo '{}' > "$OUT/ipamd_networkutils.json"
+  # Extended logs (1 hour to catch issues during large churns)
+  kubectl -n kube-system logs "$AWS_NODE_POD" -c aws-node --since=1h > "$OUT/aws_node_full.log" 2>/dev/null || true
+  # Filter for errors/warnings around this pod (exclude empty lines)
+  kubectl -n kube-system logs "$AWS_NODE_POD" -c aws-node --since=1h 2>/dev/null | \
+    grep -iE "(error|warn|fail|$POD|$POD_IP|eni-)" | grep -v '^[[:space:]]*$' > "$OUT/aws_node_errors.log" 2>/dev/null || echo "" > "$OUT/aws_node_errors.log"
 else
   echo '{}' > "$OUT/ipamd_introspection.json"
+  echo '{}' > "$OUT/ipamd_pool.json"
+  echo '{}' > "$OUT/ipamd_networkutils.json"
   echo ""   > "$OUT/aws_node_full.log"
+  echo ""   > "$OUT/aws_node_errors.log"
 fi
 
 # 6) Save which aws-node pod we hit

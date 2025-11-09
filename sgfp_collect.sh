@@ -53,6 +53,13 @@ if [ -s "$LATEST/pod_annotations.json" ] && jq -e 'has("vpc.amazonaws.com/pod-en
         else
           aws ec2 describe-network-interfaces --network-interface-ids "$POD_ENI_ID" > "$LATEST/pod_branch_eni_describe.json" 2>/dev/null || echo "{}" > "$LATEST/pod_branch_eni_describe.json"
         fi
+        # Extract ENI attachment state and timing
+        if [ -s "$LATEST/pod_branch_eni_describe.json" ] && jq -e '.NetworkInterfaces[0]' "$LATEST/pod_branch_eni_describe.json" >/dev/null 2>&1; then
+          jq -r '.NetworkInterfaces[0].Status // "unknown"' "$LATEST/pod_branch_eni_describe.json" > "$LATEST/pod_eni_status.txt" 2>/dev/null || echo "unknown" > "$LATEST/pod_eni_status.txt"
+          jq -r '.NetworkInterfaces[0].Attachment.Status // "unknown"' "$LATEST/pod_branch_eni_describe.json" > "$LATEST/pod_eni_attachment_status.txt" 2>/dev/null || echo "unknown" > "$LATEST/pod_eni_attachment_status.txt"
+          jq -r '.NetworkInterfaces[0].Attachment.AttachTime // "unknown"' "$LATEST/pod_branch_eni_describe.json" > "$LATEST/pod_eni_attach_time.txt" 2>/dev/null || echo "unknown" > "$LATEST/pod_eni_attach_time.txt"
+        fi
+        
         # Extract security groups from ENI description
         if [ -s "$LATEST/pod_branch_eni_describe.json" ] && jq -e '.NetworkInterfaces[0].Groups' "$LATEST/pod_branch_eni_describe.json" >/dev/null 2>&1; then
           # Extract SG IDs
@@ -85,7 +92,23 @@ if [ -s "$LATEST/pod_annotations.json" ] && jq -e 'has("vpc.amazonaws.com/pod-en
             echo "[]" > "$LATEST/pod_branch_eni_sgs_details.json"
           fi
           rm -f "$SG_TMP" 2>/dev/null || true
-          jq -r '.NetworkInterfaces[0].Attachment.ParentNetworkInterfaceId // empty' "$LATEST/pod_branch_eni_describe.json" > "$LATEST/pod_parent_trunk_eni.txt" 2>/dev/null || true
+          # Try to get parent trunk ENI from Attachment.ParentNetworkInterfaceId
+          PARENT_ENI=$(jq -r '.NetworkInterfaces[0].Attachment.ParentNetworkInterfaceId // empty' "$LATEST/pod_branch_eni_describe.json" 2>/dev/null || echo "")
+          # If not found, try to get from pod-eni annotation (associationID contains trunk info)
+          if [ -z "$PARENT_ENI" ] || [ "$PARENT_ENI" = "null" ] || [ "$PARENT_ENI" = "" ]; then
+            if [ -s "$LATEST/pod_annotations.json" ]; then
+              # Extract trunk association from pod-eni annotation
+              ASSOC_ID=$(jq -r '."vpc.amazonaws.com/pod-eni" | fromjson | .[0].associationID // empty' "$LATEST/pod_annotations.json" 2>/dev/null || echo "")
+              # Association ID format: trunk-assoc-xxxxx indicates trunk attachment
+              # We'll get the trunk ENI ID from the node's aws diagnostics (collected separately)
+              # The actual trunk ENI ID will be populated when aws_diag runs
+              # For now, just confirm we have an association (trunk attachment confirmed)
+              if [ -n "$ASSOC_ID" ] && [ "$ASSOC_ID" != "null" ] && [ "$ASSOC_ID" != "" ]; then
+                : # Trunk association found, will populate ENI ID later
+              fi
+            fi
+          fi
+          echo "$PARENT_ENI" > "$LATEST/pod_parent_trunk_eni.txt" 2>/dev/null || echo "" > "$LATEST/pod_parent_trunk_eni.txt"
         else
           echo "" > "$LATEST/pod_branch_eni_sgs.txt"
           echo "[]" > "$LATEST/pod_branch_eni_sgs_details.json"
@@ -191,6 +214,17 @@ fi
 
 if [ -n "$AWS_OUT" ] && [ -d "$AWS_OUT" ]; then
   mv "$AWS_OUT" "$MASTER/aws_${NODE}"
+  # Now that we have AWS diag, try to populate parent trunk ENI if we have association ID
+  if [ -s "$MASTER/pod_${POD}/pod_annotations.json" ] && [ -f "$MASTER/aws_${NODE}/trunk_eni_id.txt" ]; then
+    ASSOC_ID=$(jq -r '."vpc.amazonaws.com/pod-eni" | fromjson | .[0].associationID // empty' "$MASTER/pod_${POD}/pod_annotations.json" 2>/dev/null || echo "")
+    if [ -n "$ASSOC_ID" ] && [ "$ASSOC_ID" != "null" ] && [ "$ASSOC_ID" != "" ]; then
+      # We have a trunk association, use the trunk ENI ID from aws_diag
+      TRUNK_ID=$(cat "$MASTER/aws_${NODE}/trunk_eni_id.txt" 2>/dev/null | tr -d '[:space:]' || echo "")
+      if [ -n "$TRUNK_ID" ] && [ "$TRUNK_ID" != "null" ] && [ "$TRUNK_ID" != "" ]; then
+        echo "$TRUNK_ID" > "$MASTER/pod_${POD}/pod_parent_trunk_eni.txt" 2>/dev/null || true
+      fi
+    fi
+  fi
 else
   echo "WARN: AWS diagnostics not found, skipping" >&2
 fi
