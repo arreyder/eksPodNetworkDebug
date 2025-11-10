@@ -933,8 +933,32 @@ if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_netns_details.json" ]; then
     NETNS_COUNT=$(jq -r 'length' "$NODE_DIR/node_netns_details.json" 2>/dev/null || echo "0")
     EMPTY_NS=$(jq -r '[.[] | select(.interface_count == 0)] | length' "$NODE_DIR/node_netns_details.json" 2>/dev/null || echo "0")
     say "[INFO] Network namespaces: $NETNS_COUNT total"
+    
     if [ "$EMPTY_NS" != "0" ]; then
-      say "[ISSUE] Found $EMPTY_NS network namespace(s) with no interfaces (potential leaks)"
+      # Check for old empty namespaces (older than 1 hour - likely leaks)
+      CURRENT_TIME=$(date +%s 2>/dev/null || echo "0")
+      if [ "$CURRENT_TIME" != "0" ]; then
+        OLD_EMPTY_NS=$(jq -r --arg now "$CURRENT_TIME" '[.[] | select(.interface_count == 0 and (($now | tonumber) - .mtime) > 3600)] | length' "$NODE_DIR/node_netns_details.json" 2>/dev/null || echo "0")
+        
+        if [ "$OLD_EMPTY_NS" != "0" ] && [ "$OLD_EMPTY_NS" != "null" ] && [ "$OLD_EMPTY_NS" != "" ]; then
+          say "[ISSUE] Found $OLD_EMPTY_NS network namespace(s) with no interfaces and older than 1 hour (likely leaks)"
+          # List the orphaned namespaces with their ages
+          jq -r --arg now "$CURRENT_TIME" '.[] | select(.interface_count == 0 and (($now | tonumber) - .mtime) > 3600) | "  - `\(.name)` (age: \(($now | tonumber) - .mtime | . / 3600 | floor)h \(($now | tonumber) - .mtime | . % 3600 / 60 | floor)m)"' "$NODE_DIR/node_netns_details.json" 2>/dev/null | while read -r line; do
+            say "$line"
+          done || true
+        elif [ "$EMPTY_NS" -gt 10 ]; then
+          say "[WARN] Found $EMPTY_NS network namespace(s) with no interfaces (may be in cleanup or detection issue)"
+        else
+          say "[INFO] Found $EMPTY_NS network namespace(s) with no interfaces (may be in cleanup)"
+        fi
+      else
+        # Can't determine age, just report count
+        if [ "$EMPTY_NS" -gt 10 ]; then
+          say "[WARN] Found $EMPTY_NS network namespace(s) with no interfaces (may be in cleanup or detection issue)"
+        else
+          say "[INFO] Found $EMPTY_NS network namespace(s) with no interfaces (may be in cleanup)"
+        fi
+      fi
     fi
   fi
 fi
