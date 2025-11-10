@@ -22,9 +22,11 @@ kubectl -n "$NS" get events --field-selector involvedObject.name="$POD" --sort-b
 POD_CREATED=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null || echo "")
 POD_STARTED=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.startTime}' 2>/dev/null || echo "")
 POD_UID=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.metadata.uid}' 2>/dev/null || echo "")
+POD_TERMINATION_GRACE=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.spec.terminationGracePeriodSeconds}' 2>/dev/null || echo "")
 echo "CREATED=$POD_CREATED" > "$OUT/pod_timing.txt"
 echo "STARTED=$POD_STARTED" >> "$OUT/pod_timing.txt"
 echo "UID=$POD_UID" >> "$OUT/pod_timing.txt"
+echo "TERMINATION_GRACE_PERIOD_SECONDS=$POD_TERMINATION_GRACE" >> "$OUT/pod_timing.txt"
 
 POD_IP=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.podIP}' 2>/dev/null || echo "")
 NODE=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.spec.nodeName}' 2>/dev/null || echo "")

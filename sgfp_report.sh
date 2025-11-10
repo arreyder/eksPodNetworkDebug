@@ -72,6 +72,18 @@ echo >> "$REPORT"
 
 echo "## Pod Networking" >> "$REPORT"
 
+# Show termination grace period (relevant for network cleanup timing)
+if [ -s "$POD_TIMING" ]; then
+  TERMINATION_GRACE=$(grep "^TERMINATION_GRACE_PERIOD_SECONDS=" "$POD_TIMING" 2>/dev/null | cut -d= -f2- || echo "")
+  if [ -n "$TERMINATION_GRACE" ] && [ "$TERMINATION_GRACE" != "" ]; then
+    # Default is 30 seconds if not set
+    if [ "$TERMINATION_GRACE" = "null" ] || [ -z "$TERMINATION_GRACE" ]; then
+      TERMINATION_GRACE="30 (default)"
+    fi
+    say "[INFO] Termination grace period: ${TERMINATION_GRACE}s"
+  fi
+fi
+
 if [ -s "$POD_ANNO" ] && jq -er '."vpc.amazonaws.com/pod-eni"' "$POD_ANNO" >/dev/null 2>&1; then
   say "[OK] Pod ENI assigned (SG-for-Pods)"
   # Show ENI ID
@@ -2099,6 +2111,70 @@ if [ -n "$NODE_DIR" ]; then
     if [ -n "$AWS_NODE_IMAGE" ] && [ "$AWS_NODE_IMAGE" != "" ]; then
       say "[INFO] aws-node image: $AWS_NODE_IMAGE"
     fi
+  fi
+  
+  # AWS VPC CNI configuration settings from amazon-vpc-cni ConfigMap
+  if [ -s "$NODE_DIR/node_aws_vpc_cni_config.json" ]; then
+    echo >> "$REPORT"
+    echo "### AWS VPC CNI Configuration" >> "$REPORT"
+    say "[INFO] AWS VPC CNI ConfigMap settings:"
+    
+    # Helper function to get ConfigMap value with default
+    get_cni_config() {
+      local key="$1"
+      local default="$2"
+      local value
+      value=$(jq -r ".data.\"$key\" // \"\"" "$NODE_DIR/node_aws_vpc_cni_config.json" 2>/dev/null || echo "")
+      if [ -n "$value" ] && [ "$value" != "null" ] && [ "$value" != "" ]; then
+        echo "$value"
+      else
+        echo "$default"
+      fi
+    }
+    
+    # Branch ENI cooldown (default: 30s, minimum enforced)
+    BRANCH_ENI_COOLDOWN=$(get_cni_config "branch-eni-cooldown" "")
+    if [ -n "$BRANCH_ENI_COOLDOWN" ] && [ "$BRANCH_ENI_COOLDOWN" != "" ]; then
+      say "  - Branch ENI cooldown: ${BRANCH_ENI_COOLDOWN}s"
+    else
+      say "  - Branch ENI cooldown: not set (default: 30s, minimum enforced)"
+    fi
+    
+    # IP target settings
+    WARM_IP_TARGET=$(get_cni_config "warm-ip-target" "")
+    MINIMUM_IP_TARGET=$(get_cni_config "minimum-ip-target" "")
+    WARM_PREFIX_TARGET=$(get_cni_config "warm-prefix-target" "")
+    
+    if [ -n "$WARM_IP_TARGET" ] && [ "$WARM_IP_TARGET" != "" ]; then
+      say "  - Warm IP target: $WARM_IP_TARGET"
+    else
+      say "  - Warm IP target: not set (default: 1)"
+    fi
+    
+    if [ -n "$MINIMUM_IP_TARGET" ] && [ "$MINIMUM_IP_TARGET" != "" ]; then
+      say "  - Minimum IP target: $MINIMUM_IP_TARGET"
+    else
+      say "  - Minimum IP target: not set (default: 0)"
+    fi
+    
+    if [ -n "$WARM_PREFIX_TARGET" ] && [ "$WARM_PREFIX_TARGET" != "" ]; then
+      say "  - Warm prefix target: $WARM_PREFIX_TARGET"
+    else
+      say "  - Warm prefix target: not set (default: 1, prefix delegation only)"
+    fi
+    
+    # Feature flags
+    ENABLE_NETWORK_POLICY=$(get_cni_config "enable-network-policy-controller" "")
+    
+    if [ -n "$ENABLE_NETWORK_POLICY" ] && [ "$ENABLE_NETWORK_POLICY" != "" ]; then
+      say "  - Network policy controller: $ENABLE_NETWORK_POLICY"
+    else
+      say "  - Network policy controller: not set (default: false)"
+    fi
+    
+    say "[INFO] Full ConfigMap: \`node_*/node_aws_vpc_cni_config.json\`"
+  else
+    say "[INFO] AWS VPC CNI ConfigMap not found or empty (using defaults)"
   fi
   
   # kube-proxy version

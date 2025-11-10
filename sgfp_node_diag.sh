@@ -630,6 +630,10 @@ if command -v kubectl >/dev/null 2>&1; then
   # DNS ConfigMap (CoreDNS config)
   kubectl get configmap -n kube-system coredns -o json > "$OUT/node_coredns_config.json" 2>/dev/null || echo '{}' > "$OUT/node_coredns_config.json"
   
+  # AWS VPC CNI ConfigMap (contains CNI configuration settings like branch-eni-cooldown)
+  # Note: ConfigMap name is 'amazon-vpc-cni' (not 'aws-vpc-cni')
+  kubectl get configmap -n kube-system amazon-vpc-cni -o json > "$OUT/node_aws_vpc_cni_config.json" 2>/dev/null || echo '{}' > "$OUT/node_aws_vpc_cni_config.json"
+  
   log "Collected DNS service and CoreDNS/NodeLocal DNSCache information"
 fi
 
@@ -693,8 +697,14 @@ if command -v kubectl >/dev/null 2>&1; then
     echo "" > "$OUT/node_container_runtime_version.txt"
   fi
   
-  # aws-node DaemonSet version (from image tag)
+  # aws-node DaemonSet version (from image tag) and environment variables
   kubectl get daemonset -n kube-system aws-node -o json > "$OUT/node_aws_node_daemonset.json" 2>/dev/null || echo '{}' > "$OUT/node_aws_node_daemonset.json"
+  # Extract environment variables from aws-node daemonset (for settings like branch-eni-cooldown)
+  if [ -s "$OUT/node_aws_node_daemonset.json" ]; then
+    jq -r '.spec.template.spec.containers[0].env // []' "$OUT/node_aws_node_daemonset.json" > "$OUT/node_aws_node_env.json" 2>/dev/null || echo '[]' > "$OUT/node_aws_node_env.json"
+  else
+    echo '[]' > "$OUT/node_aws_node_env.json"
+  fi
   AWS_NODE_IMAGE=$(jq -r '.spec.template.spec.containers[0].image // ""' "$OUT/node_aws_node_daemonset.json" 2>/dev/null || echo "")
   if [ -n "$AWS_NODE_IMAGE" ] && [ "$AWS_NODE_IMAGE" != "null" ] && [ "$AWS_NODE_IMAGE" != "" ]; then
     echo "$AWS_NODE_IMAGE" > "$OUT/node_aws_node_image.txt"

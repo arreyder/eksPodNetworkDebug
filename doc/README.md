@@ -32,6 +32,7 @@ This directory contains detailed documentation for each diagnostic check perform
 26. **[IPAMD State Analysis](26-ipamd-state-analysis.md)** - Analyzes IPAMD warm pool configuration and branch ENI counts on trunk ENIs
 27. **[Pod Events Analysis](27-pod-events-analysis.md)** - Analyzes Kubernetes pod events for network-related issues and failures
 28. **[CloudTrail API Diagnostics](28-cloudtrail-api-diagnostics.md)** - Analyzes CloudTrail events for ENI-related API errors, throttles, and issues
+29. **[AWS VPC CNI ConfigMap Settings](29-aws-vpc-cni-configmap.md)** - Collects and reports AWS VPC CNI configuration settings (branch-eni-cooldown, warm IP targets, network policy controller, etc.)
 
 ## Document Structure
 
