@@ -130,6 +130,19 @@ if [ -s "$LATEST/pod_annotations.json" ] && jq -e 'has("vpc.amazonaws.com/pod-en
     echo "" > "$LATEST/pod_expected_sgs.txt"
   fi
   
+  # Collect SecurityGroupPolicy CRDs that match this pod
+  # SecurityGroupPolicy uses podSelector to match pods
+  if command -v kubectl >/dev/null 2>&1; then
+    # Get all SecurityGroupPolicy resources in the pod's namespace
+    kubectl get securitygrouppolicy -n "$NS" -o json > "$LATEST/pod_securitygrouppolicies.json" 2>/dev/null || echo '{"items":[]}' > "$LATEST/pod_securitygrouppolicies.json"
+    
+    # Also check cluster-scoped SecurityGroupPolicies (if any)
+    kubectl get securitygrouppolicy --all-namespaces -o json > "$LATEST/pod_securitygrouppolicies_all.json" 2>/dev/null || echo '{"items":[]}' > "$LATEST/pod_securitygrouppolicies_all.json"
+  else
+    echo '{"items":[]}' > "$LATEST/pod_securitygrouppolicies.json"
+    echo '{"items":[]}' > "$LATEST/pod_securitygrouppolicies_all.json"
+  fi
+  
   # Collect namespace annotations for security groups (if available)
   if kubectl get namespace "$NS" -o jsonpath='{.metadata.annotations}' > "$LATEST/namespace_annotations.json" 2>/dev/null; then
     if jq -e 'has("vpc.amazonaws.com/security-groups")' "$LATEST/namespace_annotations.json" >/dev/null 2>&1; then

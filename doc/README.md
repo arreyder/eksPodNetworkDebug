@@ -28,6 +28,10 @@ This directory contains detailed documentation for each diagnostic check perform
 22. **[Custom Networking / ENIConfig](22-custom-networking-eniconfig.md)** - Validates ENIConfig resources, subnet → AZ mapping, and node assignments
 23. **[NAT Gateway SNAT Port Exhaustion](23-nat-gateway-snat-exhaustion.md)** - Monitors NAT gateway connection counts and detects SNAT port exhaustion
 24. **[Metrics Comparison](24-metrics-comparison.md)** - Compares baseline metrics with incident state to identify changes indicating network problems
+25. **[SecurityGroupPolicy CRD Compliance](25-securitygrouppolicy-crd-compliance.md)** - Validates SecurityGroupPolicy CRD resources for compliance with the 5 security groups per policy limit
+26. **[IPAMD State Analysis](26-ipamd-state-analysis.md)** - Analyzes IPAMD warm pool configuration and branch ENI counts on trunk ENIs
+27. **[Pod Events Analysis](27-pod-events-analysis.md)** - Analyzes Kubernetes pod events for network-related issues and failures
+28. **[CloudTrail API Diagnostics](28-cloudtrail-api-diagnostics.md)** - Analyzes CloudTrail events for ENI-related API errors, throttles, and issues
 
 ## Document Structure
 

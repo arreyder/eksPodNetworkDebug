@@ -1637,6 +1637,194 @@ if [ -n "$POD_DIR" ] && [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_k8s_networkpo
 fi
 
 echo ""
+echo "=== SecurityGroupPolicy CRD Compliance Analysis ==="
+
+# Check SecurityGroupPolicy CRD compliance (max 5 SGs per policy, can use multiple policies for up to 10 SGs)
+# SecurityGroupPolicy uses podSelector to match pods
+if [ -s "$POD_DIR/pod_securitygrouppolicies.json" ] || [ -s "$POD_DIR/pod_securitygrouppolicies_all.json" ]; then
+  # Get pod labels and namespace for matching
+  POD_LABELS=$(jq -r '.metadata.labels // {}' "$POD_DIR/pod_full.json" 2>/dev/null || echo "{}")
+  POD_NS=$(jq -r '.metadata.namespace // ""' "$POD_DIR/pod_full.json" 2>/dev/null || echo "")
+  
+  # Function to check if podSelector matches pod
+  # podSelector can have matchLabels (exact match) or matchExpressions (more complex)
+  check_podselector_match() {
+    local selector="$1"
+    local pod_labels="$2"
+    local pod_ns="$3"
+    local sgp_ns="$4"
+    
+    # Check namespace match (if SecurityGroupPolicy is namespaced)
+    if [ -n "$sgp_ns" ] && [ "$sgp_ns" != "null" ] && [ "$sgp_ns" != "" ]; then
+      if [ "$sgp_ns" != "$pod_ns" ]; then
+        echo "false"
+        return
+      fi
+    fi
+    
+    # Check matchLabels (simple key-value matching)
+    if echo "$selector" | jq -e '.matchLabels // empty' >/dev/null 2>&1; then
+      MATCH_LABELS=$(echo "$selector" | jq -r '.matchLabels // {}' 2>/dev/null || echo "{}")
+      if [ "$MATCH_LABELS" != "{}" ] && [ "$MATCH_LABELS" != "null" ]; then
+        # Check each label in matchLabels
+        MATCH_COUNT=$(echo "$MATCH_LABELS" | jq -r 'keys | length' 2>/dev/null || echo "0")
+        if [ "$MATCH_COUNT" -gt 0 ]; then
+          ALL_MATCH=1
+          for KEY in $(echo "$MATCH_LABELS" | jq -r 'keys[]' 2>/dev/null || echo ""); do
+            EXPECTED_VAL=$(echo "$MATCH_LABELS" | jq -r ".[\"$KEY\"]" 2>/dev/null || echo "")
+            ACTUAL_VAL=$(echo "$pod_labels" | jq -r ".[\"$KEY\"] // \"\"" 2>/dev/null || echo "")
+            if [ "$ACTUAL_VAL" != "$EXPECTED_VAL" ]; then
+              ALL_MATCH=0
+              break
+            fi
+          done
+          if [ "$ALL_MATCH" -eq 0 ]; then
+            echo "false"
+            return
+          fi
+        fi
+      fi
+    fi
+    
+    # For matchExpressions, we'll do a simplified check (exact match only)
+    # Full matchExpressions evaluation would require more complex logic
+    if echo "$selector" | jq -e '.matchExpressions // empty' >/dev/null 2>&1; then
+      # For now, we'll assume matchExpressions might match (conservative approach)
+      # In practice, you'd need to evaluate operators like In, NotIn, Exists, DoesNotExist
+      : # Continue checking
+    fi
+    
+    echo "true"
+  }
+  
+  # Check both namespace-scoped and cluster-scoped SecurityGroupPolicies
+  # Use a temporary file to track processed SGP names+namespaces to avoid duplicates
+  SGP_PROCESSED=$(mktemp)
+  
+  MATCHING_SGPS=0
+  TOTAL_SGS=0
+  SGP_ISSUES=0
+  
+  # First check namespace-scoped SecurityGroupPolicies
+  if [ -s "$POD_DIR/pod_securitygrouppolicies.json" ]; then
+    SGP_COUNT=$(jq -r '.items | length' "$POD_DIR/pod_securitygrouppolicies.json" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    if [ "$SGP_COUNT" != "0" ] && [ -n "$SGP_COUNT" ]; then
+      SGP_INDEX=0
+      while [ "$SGP_INDEX" -lt "$SGP_COUNT" ]; do
+        SGP_NAME=$(jq -r ".items[$SGP_INDEX].metadata.name // \"\"" "$POD_DIR/pod_securitygrouppolicies.json" 2>/dev/null || echo "")
+        SGP_NS=$(jq -r ".items[$SGP_INDEX].metadata.namespace // \"\"" "$POD_DIR/pod_securitygrouppolicies.json" 2>/dev/null || echo "")
+        SGP_KEY="${SGP_NS:-cluster-scoped}/${SGP_NAME}"
+        
+        if [ -n "$SGP_NAME" ] && [ "$SGP_NAME" != "null" ]; then
+          # Check if already processed
+          if ! grep -q "^${SGP_KEY}$" "$SGP_PROCESSED" 2>/dev/null; then
+            echo "$SGP_KEY" >> "$SGP_PROCESSED"
+            
+            POD_SELECTOR=$(jq -r ".items[$SGP_INDEX].spec.podSelector // {}" "$POD_DIR/pod_securitygrouppolicies.json" 2>/dev/null || echo "{}")
+            SGP_SGS=$(jq -r ".items[$SGP_INDEX].spec.securityGroups.groupIds // []" "$POD_DIR/pod_securitygrouppolicies.json" 2>/dev/null || echo "[]")
+            
+            # Check if this SecurityGroupPolicy matches the pod
+            MATCHES=$(check_podselector_match "$POD_SELECTOR" "$POD_LABELS" "$POD_NS" "$SGP_NS")
+            
+            if [ "$MATCHES" = "true" ]; then
+              MATCHING_SGPS=$((MATCHING_SGPS + 1))
+              
+              # Count security groups in this policy
+              SG_COUNT=$(echo "$SGP_SGS" | jq -r 'length' 2>/dev/null || echo "0")
+              TOTAL_SGS=$((TOTAL_SGS + SG_COUNT))
+              
+              echo "[INFO] SecurityGroupPolicy '$SGP_NAME' matches pod (namespace: ${SGP_NS:-cluster-scoped})"
+              echo "  - Security Groups: $SG_COUNT SG(s)"
+              
+              # Check compliance: max 5 SGs per SecurityGroupPolicy
+              if [ "$SG_COUNT" -gt 5 ]; then
+                echo "  - [ISSUE] SecurityGroupPolicy '$SGP_NAME' has $SG_COUNT security groups (exceeds limit of 5 per policy)"
+                echo "    Recommendation: Split into multiple SecurityGroupPolicy resources (max 5 SGs each, up to 10 total)"
+                issues=$((issues+1))
+                SGP_ISSUES=1
+              fi
+            fi
+          fi
+        fi
+        
+        SGP_INDEX=$((SGP_INDEX + 1))
+      done
+    fi
+  fi
+  
+  # Then check cluster-scoped SecurityGroupPolicies (from all-namespaces, but skip ones already processed)
+  if [ -s "$POD_DIR/pod_securitygrouppolicies_all.json" ]; then
+    SGP_COUNT=$(jq -r '.items | length' "$POD_DIR/pod_securitygrouppolicies_all.json" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    if [ "$SGP_COUNT" != "0" ] && [ -n "$SGP_COUNT" ]; then
+      SGP_INDEX=0
+      while [ "$SGP_INDEX" -lt "$SGP_COUNT" ]; do
+        SGP_NAME=$(jq -r ".items[$SGP_INDEX].metadata.name // \"\"" "$POD_DIR/pod_securitygrouppolicies_all.json" 2>/dev/null || echo "")
+        SGP_NS=$(jq -r ".items[$SGP_INDEX].metadata.namespace // \"\"" "$POD_DIR/pod_securitygrouppolicies_all.json" 2>/dev/null || echo "")
+        SGP_KEY="${SGP_NS:-cluster-scoped}/${SGP_NAME}"
+        
+        if [ -n "$SGP_NAME" ] && [ "$SGP_NAME" != "null" ]; then
+          # Check if already processed (skip if found in namespace-scoped list)
+          if ! grep -q "^${SGP_KEY}$" "$SGP_PROCESSED" 2>/dev/null; then
+            echo "$SGP_KEY" >> "$SGP_PROCESSED"
+            
+            POD_SELECTOR=$(jq -r ".items[$SGP_INDEX].spec.podSelector // {}" "$POD_DIR/pod_securitygrouppolicies_all.json" 2>/dev/null || echo "{}")
+            SGP_SGS=$(jq -r ".items[$SGP_INDEX].spec.securityGroups.groupIds // []" "$POD_DIR/pod_securitygrouppolicies_all.json" 2>/dev/null || echo "[]")
+            
+            # Check if this SecurityGroupPolicy matches the pod
+            MATCHES=$(check_podselector_match "$POD_SELECTOR" "$POD_LABELS" "$POD_NS" "$SGP_NS")
+            
+            if [ "$MATCHES" = "true" ]; then
+              MATCHING_SGPS=$((MATCHING_SGPS + 1))
+              
+              # Count security groups in this policy
+              SG_COUNT=$(echo "$SGP_SGS" | jq -r 'length' 2>/dev/null || echo "0")
+              TOTAL_SGS=$((TOTAL_SGS + SG_COUNT))
+              
+              echo "[INFO] SecurityGroupPolicy '$SGP_NAME' matches pod (namespace: ${SGP_NS:-cluster-scoped})"
+              echo "  - Security Groups: $SG_COUNT SG(s)"
+              
+              # Check compliance: max 5 SGs per SecurityGroupPolicy
+              if [ "$SG_COUNT" -gt 5 ]; then
+                echo "  - [ISSUE] SecurityGroupPolicy '$SGP_NAME' has $SG_COUNT security groups (exceeds limit of 5 per policy)"
+                echo "    Recommendation: Split into multiple SecurityGroupPolicy resources (max 5 SGs each, up to 10 total)"
+                issues=$((issues+1))
+                SGP_ISSUES=1
+              fi
+            fi
+          fi
+        fi
+        
+        SGP_INDEX=$((SGP_INDEX + 1))
+      done
+    fi
+  fi
+  
+  rm -f "$SGP_PROCESSED" 2>/dev/null || true
+  
+  if [ "$MATCHING_SGPS" -eq 0 ]; then
+    echo "[INFO] No SecurityGroupPolicy resources found matching this pod"
+    echo "  - Pod may be using annotation-based security groups (vpc.amazonaws.com/security-groups)"
+  else
+    echo "[INFO] Found $MATCHING_SGPS SecurityGroupPolicy resource(s) matching this pod"
+    echo "  - Total security groups across all policies: $TOTAL_SGS"
+    
+    if [ "$MATCHING_SGPS" -gt 1 ]; then
+      echo "  - [INFO] Multiple SecurityGroupPolicy resources used (allows up to 10 security groups total)"
+      if [ "$TOTAL_SGS" -gt 10 ]; then
+        echo "  - [WARN] Total security groups ($TOTAL_SGS) exceeds recommended limit of 10 (across all policies)"
+        warnings=$((warnings+1))
+      fi
+    fi
+    
+    if [ "$SGP_ISSUES" -eq 0 ]; then
+      echo "[OK] All SecurityGroupPolicy resources comply with 5 SGs per policy limit"
+    fi
+  fi
+else
+  echo "[INFO] SecurityGroupPolicy data not available (may not be using SecurityGroupPolicy CRD)"
+fi
+
+echo ""
 echo "=== Custom Networking / ENIConfig Analysis ==="
 
 # Check for ENIConfig resources

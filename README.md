@@ -7,6 +7,7 @@ This toolkit collects comprehensive diagnostics for AWS EKS pods using Security 
 
 - **Comprehensive Pod Diagnostics**: Collects pod annotations, conditions, network namespace routes/rules, interface statistics, socket statistics, and reachability tests
 - **Security Group Validation**: Automatically validates actual SGs on pod ENI against expected SGs from pod, deployment, replicaset, or namespace annotations
+- **SecurityGroupPolicy CRD Compliance**: Validates SecurityGroupPolicy CRD resources for compliance with the 5 security groups per policy limit, detects violations, and reports when multiple policies are used
 - **SG Details**: Shows Security Group IDs, names, and descriptions for easy identification
 - **Node Diagnostics**: Collects conntrack usage, interface error statistics, socket overruns, and AWS VPC CNI logs (automatically via temporary debug pod)
 - **CNI Log Analysis**: Automatically collects and analyzes CNI logs from `/var/log/aws-routed-eni/` including ipamd, plugin, network-policy-agent, and eBPF SDK logs
@@ -52,6 +53,10 @@ Detailed documentation for each diagnostic check is available in the [`doc/`](do
 - [NAT Gateway SNAT Port Exhaustion](doc/23-nat-gateway-snat-exhaustion.md)
 - [Metrics Comparison](doc/24-metrics-comparison.md)
 - [Security Group Validation](doc/05-security-group-validation.md)
+- [SecurityGroupPolicy CRD Compliance](doc/25-securitygrouppolicy-crd-compliance.md)
+- [IPAMD State Analysis](doc/26-ipamd-state-analysis.md)
+- [Pod Events Analysis](doc/27-pod-events-analysis.md)
+- [CloudTrail API Diagnostics](doc/28-cloudtrail-api-diagnostics.md)
 - [Network Namespace Leaks](doc/06-network-namespace-leaks.md)
 - [DNS Resolution](doc/08-dns-resolution.md)
 - [SYN_SENT Detection](doc/10-syn-sent-detection.md)
@@ -151,6 +156,8 @@ sgfp_bundle_<pod>_<timestamp>/
     deployment_expected_sgs.txt          # Expected SGs from deployment annotation
     replicaset_expected_sgs.txt          # Expected SGs from replicaset annotation
     namespace_expected_sgs.txt           # Expected SGs from namespace annotation
+    pod_securitygrouppolicies.json       # SecurityGroupPolicy CRDs in pod's namespace
+    pod_securitygrouppolicies_all.json  # All SecurityGroupPolicy CRDs (cluster-wide)
     deployment_annotations.json
     replicaset_annotations.json
     namespace_annotations.json
@@ -620,7 +627,9 @@ The toolkit automatically validates Security Groups by:
    - Deployment annotation: `vpc.amazonaws.com/security-groups`
    - ReplicaSet annotation: `vpc.amazonaws.com/security-groups`
    - Namespace annotation: `vpc.amazonaws.com/security-groups`
-3. **Comparing** actual vs expected and reporting mismatches
+3. **Collecting SecurityGroupPolicy CRDs** that match the pod (via `podSelector`)
+4. **Validating SecurityGroupPolicy compliance** (max 5 SGs per policy, up to 10 total across multiple policies)
+5. **Comparing** actual vs expected and reporting mismatches
 
 The report shows:
 - Actual SGs with names and descriptions
