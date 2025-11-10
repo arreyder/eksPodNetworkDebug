@@ -1513,55 +1513,157 @@ if [ -n "$NODE_DIR" ]; then
       fi
     fi
     
-    # Check for pod-specific iptables rules
+    # Check for pod-specific iptables rules (comprehensive analysis)
     POD_IP=$(grep "^POD_IP=" "$POD_IP_FILE" 2>/dev/null | cut -d= -f2- || echo "")
     VETH_NAME=$(cat "$POD_VETH" 2>/dev/null | tr -d '[:space:]' || echo "")
     
     if [ -n "$POD_IP" ] && [ "$POD_IP" != "unknown" ]; then
-      POD_IPTABLES_FOUND=0
-      POD_IPTABLES_TMP=$(mktemp)
+      POD_IPTABLES_FILTER_TMP=$(mktemp)
+      POD_IPTABLES_NAT_TMP=$(mktemp)
       
-      # Search for pod IP in iptables rules
+      # Search for pod IP in FILTER table (all matches, not limited)
       if [ -s "$NODE_IPTABLES_FILTER" ]; then
-        grep -i "$POD_IP" "$NODE_IPTABLES_FILTER" 2>/dev/null | head -5 > "$POD_IPTABLES_TMP" || true
-        if [ -s "$POD_IPTABLES_TMP" ]; then
-          POD_IPTABLES_FOUND=1
-        fi
+        grep -i "$POD_IP" "$NODE_IPTABLES_FILTER" 2>/dev/null > "$POD_IPTABLES_FILTER_TMP" || true
       fi
+      
+      # Search for pod IP in NAT table (all matches, not limited)
       if [ -s "$NODE_IPTABLES_NAT" ]; then
-        grep -i "$POD_IP" "$NODE_IPTABLES_NAT" 2>/dev/null | head -5 >> "$POD_IPTABLES_TMP" || true
-        if [ -s "$POD_IPTABLES_TMP" ]; then
-          POD_IPTABLES_FOUND=1
-        fi
+        grep -i "$POD_IP" "$NODE_IPTABLES_NAT" 2>/dev/null > "$POD_IPTABLES_NAT_TMP" || true
       fi
       
       # Also check for veth interface name if available
       if [ -n "$VETH_NAME" ] && [ "$VETH_NAME" != "unknown" ]; then
         if [ -s "$NODE_IPTABLES_FILTER" ]; then
-          grep -i "$VETH_NAME" "$NODE_IPTABLES_FILTER" 2>/dev/null | head -3 >> "$POD_IPTABLES_TMP" || true
+          grep -i "$VETH_NAME" "$NODE_IPTABLES_FILTER" 2>/dev/null >> "$POD_IPTABLES_FILTER_TMP" || true
         fi
         if [ -s "$NODE_IPTABLES_NAT" ]; then
-          grep -i "$VETH_NAME" "$NODE_IPTABLES_NAT" 2>/dev/null | head -3 >> "$POD_IPTABLES_TMP" || true
+          grep -i "$VETH_NAME" "$NODE_IPTABLES_NAT" 2>/dev/null >> "$POD_IPTABLES_NAT_TMP" || true
         fi
       fi
       
-      # Count total matches
-      POD_RULE_COUNT=$(grep -v '^[[:space:]]*$' "$POD_IPTABLES_TMP" 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+      # Count actual rule lines (not chain headers or empty lines)
+      FILTER_RULE_COUNT=$(grep -E "^[[:space:]]+[0-9]+" "$POD_IPTABLES_FILTER_TMP" 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+      NAT_RULE_COUNT=$(grep -E "^[[:space:]]+[0-9]+" "$POD_IPTABLES_NAT_TMP" 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+      POD_RULE_COUNT=$((FILTER_RULE_COUNT + NAT_RULE_COUNT))
       
       if [ "$POD_RULE_COUNT" -gt 0 ]; then
+        echo >> "$REPORT"
         say "[OK] Found $POD_RULE_COUNT iptables rule(s) matching pod IP $POD_IP"
-        # Show a few example rules
-        if [ "$POD_RULE_COUNT" -le 5 ]; then
-          grep -v '^[[:space:]]*$' "$POD_IPTABLES_TMP" 2>/dev/null | head -3 | sed 's/^/    /' >> "$REPORT" 2>/dev/null || true
-        else
-          grep -v '^[[:space:]]*$' "$POD_IPTABLES_TMP" 2>/dev/null | head -2 | sed 's/^/    /' >> "$REPORT" 2>/dev/null || true
-          say "    ... and $((POD_RULE_COUNT - 2)) more rule(s) (see iptables files for full details)"
+        
+        # Process NAT table rules (most important for service traffic)
+        if [ "$NAT_RULE_COUNT" -gt 0 ]; then
+          say "[INFO] NAT table rules ($NAT_RULE_COUNT rule(s)):"
+          
+          # Group rules by chain - find which chain each matching rule belongs to
+          if [ -s "$POD_IPTABLES_NAT_TMP" ]; then
+            NAT_RULES_SORTED=$(mktemp)
+            grep -E "^[[:space:]]+[0-9]+" "$POD_IPTABLES_NAT_TMP" 2>/dev/null | sort -u > "$NAT_RULES_SORTED" || true
+            
+            LAST_NAT_CHAIN=""
+            while IFS= read -r rule_line; do
+              # Find which chain this rule belongs to by looking backwards in the file
+              # Use the first occurrence of this rule
+              RULE_LINE_NUM=$(grep -n -F "$rule_line" "$NODE_IPTABLES_NAT" 2>/dev/null | head -1 | cut -d: -f1 || echo "")
+              if [ -n "$RULE_LINE_NUM" ] && [ "$RULE_LINE_NUM" != "0" ]; then
+                # Find the most recent chain header before this line
+                CHAIN_NAME=$(sed -n "1,${RULE_LINE_NUM}p" "$NODE_IPTABLES_NAT" 2>/dev/null | grep "^Chain " | tail -1 | sed -E 's/^Chain ([^ ]+).*/\1/' || echo "UNKNOWN")
+                
+                # Extract packet count for display
+                PKTS=$(echo "$rule_line" | awk '{print $1}' | tr -d '[:space:]' || echo "0")
+                # Format packet count
+                if echo "$PKTS" | grep -qE "[KM]$"; then
+                  PKTS_DISPLAY="$PKTS"
+                else
+                  PKTS_NUM=$(echo "$PKTS" | grep -oE '^[0-9]+' || echo "0")
+                  if [ "$PKTS_NUM" -gt 1000000 ] 2>/dev/null; then
+                    PKTS_DISPLAY="$(awk "BEGIN {printf \"%.1fM\", $PKTS_NUM/1000000}")"
+                  elif [ "$PKTS_NUM" -gt 1000 ] 2>/dev/null; then
+                    PKTS_DISPLAY="$(awk "BEGIN {printf \"%.1fK\", $PKTS_NUM/1000}")"
+                  else
+                    PKTS_DISPLAY="$PKTS"
+                  fi
+                fi
+                
+                # Show chain name if it changed, then the rule
+                if [ "$CHAIN_NAME" != "$LAST_NAT_CHAIN" ]; then
+                  say "  Chain: \`$CHAIN_NAME\`"
+                  LAST_NAT_CHAIN="$CHAIN_NAME"
+                fi
+                
+                # Show the full rule with formatted packet count
+                RULE_REST=$(echo "$rule_line" | sed -E "s/^[[:space:]]+[0-9]+[KM]?[[:space:]]+[0-9]+[KM]?[[:space:]]+//" || echo "$rule_line")
+                say "    [$PKTS_DISPLAY pkts] $RULE_REST"
+              fi
+            done < "$NAT_RULES_SORTED"
+            rm -f "$NAT_RULES_SORTED" 2>/dev/null || true
+          fi
         fi
+        
+        # Process FILTER table rules
+        if [ "$FILTER_RULE_COUNT" -gt 0 ]; then
+          say "[INFO] FILTER table rules ($FILTER_RULE_COUNT rule(s)):"
+          
+          # Group rules by chain - find which chain each matching rule belongs to
+          if [ -s "$POD_IPTABLES_FILTER_TMP" ]; then
+            FILTER_RULES_SORTED=$(mktemp)
+            grep -E "^[[:space:]]+[0-9]+" "$POD_IPTABLES_FILTER_TMP" 2>/dev/null | sort -u > "$FILTER_RULES_SORTED" || true
+            
+            LAST_FILTER_CHAIN=""
+            while IFS= read -r rule_line; do
+              # Find which chain this rule belongs to by looking backwards in the file
+              # Use the first occurrence of this rule
+              RULE_LINE_NUM=$(grep -n -F "$rule_line" "$NODE_IPTABLES_FILTER" 2>/dev/null | head -1 | cut -d: -f1 || echo "")
+              if [ -n "$RULE_LINE_NUM" ] && [ "$RULE_LINE_NUM" != "0" ]; then
+                # Find the most recent chain header before this line
+                CHAIN_NAME=$(sed -n "1,${RULE_LINE_NUM}p" "$NODE_IPTABLES_FILTER" 2>/dev/null | grep "^Chain " | tail -1 | sed -E 's/^Chain ([^ ]+).*/\1/' || echo "UNKNOWN")
+                
+                # Extract packet count for display
+                PKTS=$(echo "$rule_line" | awk '{print $1}' | tr -d '[:space:]' || echo "0")
+                # Format packet count
+                if echo "$PKTS" | grep -qE "[KM]$"; then
+                  PKTS_DISPLAY="$PKTS"
+                else
+                  PKTS_NUM=$(echo "$PKTS" | grep -oE '^[0-9]+' || echo "0")
+                  if [ "$PKTS_NUM" -gt 1000000 ] 2>/dev/null; then
+                    PKTS_DISPLAY="$(awk "BEGIN {printf \"%.1fM\", $PKTS_NUM/1000000}")"
+                  elif [ "$PKTS_NUM" -gt 1000 ] 2>/dev/null; then
+                    PKTS_DISPLAY="$(awk "BEGIN {printf \"%.1fK\", $PKTS_NUM/1000}")"
+                  else
+                    PKTS_DISPLAY="$PKTS"
+                  fi
+                fi
+                
+                # Show chain name if it changed, then the rule
+                if [ "$CHAIN_NAME" != "$LAST_FILTER_CHAIN" ]; then
+                  say "  Chain: \`$CHAIN_NAME\`"
+                  LAST_FILTER_CHAIN="$CHAIN_NAME"
+                fi
+                
+                # Show the full rule with formatted packet count
+                RULE_REST=$(echo "$rule_line" | sed -E "s/^[[:space:]]+[0-9]+[KM]?[[:space:]]+[0-9]+[KM]?[[:space:]]+//" || echo "$rule_line")
+                say "    [$PKTS_DISPLAY pkts] $RULE_REST"
+              fi
+            done < "$FILTER_RULES_SORTED"
+            rm -f "$FILTER_RULES_SORTED" 2>/dev/null || true
+          fi
+        fi
+        
+        # Summary
+        if [ "$NAT_RULE_COUNT" -gt 0 ] && [ "$FILTER_RULE_COUNT" -gt 0 ]; then
+          say "[INFO] Total: $NAT_RULE_COUNT NAT rule(s) + $FILTER_RULE_COUNT FILTER rule(s) = $POD_RULE_COUNT total"
+        elif [ "$NAT_RULE_COUNT" -gt 0 ]; then
+          say "[INFO] All rules are in NAT table (service traffic routing)"
+        elif [ "$FILTER_RULE_COUNT" -gt 0 ]; then
+          say "[INFO] All rules are in FILTER table (packet filtering)"
+        fi
+        
+        # Link to full iptables files
+        say "[INFO] Full iptables rules: \`node_*/node_iptables_nat.txt\` and \`node_*/node_iptables_filter.txt\`"
       else
         say "[INFO] No iptables rules found matching pod IP $POD_IP (may be normal if no network policies apply)"
       fi
       
-      rm -f "$POD_IPTABLES_TMP" 2>/dev/null || true
+      rm -f "$POD_IPTABLES_FILTER_TMP" "$POD_IPTABLES_NAT_TMP" 2>/dev/null || true
     fi
   fi
 fi
