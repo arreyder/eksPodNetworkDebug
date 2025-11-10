@@ -1837,6 +1837,19 @@ if [ -n "$NODE_DIR" ]; then
   fi
 fi
 
+# Metrics Comparison (if baseline comparison was performed)
+if [ -s "$BUNDLE/metrics_comparison.txt" ]; then
+  echo >> "$REPORT"
+  echo "## Metrics Comparison (Baseline vs Incident)" >> "$REPORT"
+  say "[INFO] Metrics comparison between baseline and incident state:"
+  echo "" >> "$REPORT"
+  echo "\`\`\`" >> "$REPORT"
+  cat "$BUNDLE/metrics_comparison.txt" >> "$REPORT" 2>/dev/null || echo "[INFO] Metrics comparison data not available" >> "$REPORT"
+  echo "\`\`\`" >> "$REPORT"
+  say "[INFO] Full metrics comparison: \`metrics_comparison.txt\`"
+  say "[INFO] Baseline metrics: \`incident_baseline/\`"
+fi
+
 # Commands to view related logs
 echo >> "$REPORT"
 echo "## View Related Logs" >> "$REPORT"

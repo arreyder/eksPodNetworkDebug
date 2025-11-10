@@ -28,6 +28,16 @@ done
 need(){ command -v "$1" >/dev/null 2>&1 || { echo "[DOCTOR] ERROR: Missing dependency: $1"; exit 1; }; }
 need kubectl; need jq; need awk; need grep
 
+# Check if baseline comparison is requested
+BASELINE_COMPARE=0
+BASELINE_OLD_DIR=""
+if [ -n "${SGFP_BASELINE_DIR:-}" ] && [ -d "$SGFP_BASELINE_DIR" ]; then
+  BASELINE_COMPARE=1
+  BASELINE_OLD_DIR="$SGFP_BASELINE_DIR"
+  echo "[DOCTOR] Baseline comparison enabled: $BASELINE_OLD_DIR"
+  echo "[DOCTOR] Will capture incident baseline snapshot and compare metrics"
+fi
+
 echo "[DOCTOR] [1/6] Collecting diagnostics for pod '$POD' in ns '$NS'..."
 if ! ./sgfp_collect.sh -n "$NS" "$POD" 2>&1; then
   echo "[DOCTOR] WARN: Collection had errors, but continuing..." >&2
@@ -35,6 +45,22 @@ fi
 BUNDLE_DIR="$(ls -dt sgfp_bundle_* 2>/dev/null | head -1 || true)"
 [ -n "$BUNDLE_DIR" ] && [ -d "$BUNDLE_DIR" ] || { echo "[DOCTOR] ERROR: Failed to collect bundle." >&2; exit 1; }
 echo "[DOCTOR] Bundle: $BUNDLE_DIR"
+
+# Capture incident baseline snapshot if comparison is enabled
+if [ "$BASELINE_COMPARE" -eq 1 ]; then
+  echo "[DOCTOR] [1.5/6] Capturing incident baseline snapshot for metrics comparison..."
+  if ./sgfp_baseline_capture.sh --label incident 2>&1; then
+    BASELINE_INCIDENT_DIR="$(ls -dt sgfp_baseline_incident_* 2>/dev/null | head -1 || true)"
+    if [ -n "$BASELINE_INCIDENT_DIR" ] && [ -d "$BASELINE_INCIDENT_DIR" ]; then
+      echo "[DOCTOR] Incident baseline: $BASELINE_INCIDENT_DIR"
+      # Copy incident baseline into bundle for reference
+      mkdir -p "$BUNDLE_DIR/incident_baseline"
+      cp -r "$BASELINE_INCIDENT_DIR"/* "$BUNDLE_DIR/incident_baseline/" 2>/dev/null || true
+    fi
+  else
+    echo "[DOCTOR] WARN: Failed to capture incident baseline snapshot" >&2
+  fi
+fi
 
 if [ -n "$API_DIR" ]; then
   [ -d "$API_DIR" ] || { echo "[DOCTOR] ERROR: --api-dir not found: $API_DIR"; exit 1; }
@@ -66,6 +92,22 @@ fi
 echo "[DOCTOR] [5/6] Running connectivity analysis..."
 if ! ./sgfp_analyze_connectivity.sh "$BUNDLE_DIR" 2>&1; then
   echo "[DOCTOR] WARN: Connectivity analysis had errors" >&2
+fi
+
+# Run metrics comparison if baseline is available
+if [ "$BASELINE_COMPARE" -eq 1 ] && [ -n "$BASELINE_OLD_DIR" ]; then
+  BASELINE_INCIDENT_DIR="$(ls -dt sgfp_baseline_incident_* 2>/dev/null | head -1 || true)"
+  if [ -n "$BASELINE_INCIDENT_DIR" ] && [ -d "$BASELINE_INCIDENT_DIR" ]; then
+    echo "[DOCTOR] [5.5/6] Analyzing metrics differences..."
+    if ./sgfp_analyze_metrics_diff.sh "$BASELINE_OLD_DIR" "$BASELINE_INCIDENT_DIR" > "$BUNDLE_DIR/metrics_comparison.txt" 2>&1; then
+      echo "[DOCTOR] Metrics comparison saved to: $BUNDLE_DIR/metrics_comparison.txt"
+      # Regenerate report to include metrics comparison
+      echo "[DOCTOR] Regenerating report with metrics comparison..."
+      ./sgfp_report.sh "$BUNDLE_DIR" >/dev/null 2>&1 || true
+    else
+      echo "[DOCTOR] WARN: Metrics comparison had errors" >&2
+    fi
+  fi
 fi
 
 echo "[DOCTOR] [6/6] Displaying report..."

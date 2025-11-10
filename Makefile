@@ -1,5 +1,5 @@
 
-.PHONY: collect api report analyze doctor clean clean-debug-pods node-debug view-logs quick-check
+.PHONY: collect api report analyze doctor clean clean-debug-pods node-debug view-logs quick-check baseline compare-baseline
 
 NS ?= default
 POD ?=
@@ -31,7 +31,7 @@ doctor:
 
 clean:
 	@echo "Cleaning up diagnostic output directories..."
-	@rm -rf sgfp_bundle_*/ sgfp_diag_*/ sgfp_api_diag_*/
+	@rm -rf sgfp_bundle_*/ sgfp_diag_*/ sgfp_api_diag_*/ sgfp_baseline_*/
 	@echo "Done."
 
 clean-debug-pods:
@@ -48,3 +48,14 @@ view-logs:
 quick-check:
 	@[ -n "$(POD)" ] || (echo "POD required: make quick-check POD=<pod> [NS=default]"; exit 1)
 	@./sgfp_quick_check.sh $(NS) $(POD)
+
+baseline:
+	@./sgfp_baseline_capture.sh $(LABEL)
+
+compare-baseline:
+	@[ -n "$(INCIDENT)" ] || (echo "INCIDENT required: make compare-baseline INCIDENT=<incident-dir> [BASELINE=<baseline-dir>]"; exit 1)
+	@if [ -n "$(BASELINE)" ]; then \
+		./sgfp_compare_baseline.sh $(BASELINE) $(INCIDENT); \
+	else \
+		./sgfp_compare_baseline.sh $(INCIDENT); \
+	fi

@@ -27,6 +27,7 @@ This directory contains detailed documentation for each diagnostic check perform
 21. **[AMI / CNI / Kernel Drift](21-ami-cni-kernel-drift.md)** - Detects version mismatches and drift in Kubernetes components, AMI, and kernel
 22. **[Custom Networking / ENIConfig](22-custom-networking-eniconfig.md)** - Validates ENIConfig resources, subnet → AZ mapping, and node assignments
 23. **[NAT Gateway SNAT Port Exhaustion](23-nat-gateway-snat-exhaustion.md)** - Monitors NAT gateway connection counts and detects SNAT port exhaustion
+24. **[Metrics Comparison](24-metrics-comparison.md)** - Compares baseline metrics with incident state to identify changes indicating network problems
 
 ## Document Structure
 
