@@ -206,9 +206,10 @@ data/<cluster-context>/sgfp_bundle_<cluster-context>_<pod>_<timestamp>/
     node_sockstat.txt                      # Socket statistics
     node_sockstat6.txt                     # IPv6 socket statistics
     node_snmp.txt                          # Socket overruns
-    node_netns_count.txt                   # Network namespace count
     node_netns_list.txt                    # List of network namespaces
-    node_netns_details.json                # Network namespace details (interfaces, IPs, timing)
+    node_netns_details.json                # Network namespace details (interfaces, IPs, process count, timing)
+    node_pod_ip_map.txt                    # Map of active pod IPv4 addresses to namespace/name
+    node_pod_ipv6_map.txt                  # Map of active pod IPv6 addresses to namespace/name
     node_interfaces_state.txt              # All interface states
     node_all_ips.txt                       # All IP addresses on node
     node_duplicate_ips.txt                 # Duplicate IP addresses (if any)
@@ -343,7 +344,10 @@ Collects node-level diagnostics: conntrack usage, interface error statistics, so
 - Collects interface error statistics from `/proc/net/dev` and `ip -s link`
 - Collects socket statistics including overruns from `/proc/net/sockstat` and `/proc/net/snmp`
 - Creates error summaries for each CNI log file
-- Analyzes network namespaces for leaks (orphaned namespaces with no interfaces, only flags as issue if older than 1 hour)
+- **Enhanced orphaned namespace detection**: Uses IP-based matching to accurately identify truly orphaned network namespaces by:
+  - Collecting actual IP addresses (IPv4 and IPv6) from each network namespace
+  - Creating a map of all active pod IPs to `namespace/name` identifiers
+  - Matching namespace IPs against active pod IPs (only flags as orphaned if no matching pod found, no processes, and older than 1 hour)
 - Detects IP address conflicts (duplicate IPs on node)
 - Tests DNS resolution (Kubernetes DNS, metadata service)
 - Collects CoreDNS pod status and configuration
@@ -454,8 +458,7 @@ Advanced analysis for diagnosing pod connectivity issues, especially after large
 - Analyzes pod events for network-related issues
 - Analyzes CNI logs (both aws-node and node-level CNI logs)
 - Checks readiness gate timing
-- Detects stuck/orphaned network namespaces
-- Analyzes network namespace creation timing (delays after pod creation)
+- Detects truly orphaned network namespaces using IP-based matching (matches namespace IPs against active pod IPs)
 - Detects IP address conflicts
 - Tests DNS resolution
 - Checks for resource exhaustion (file descriptors, memory pressure)
@@ -721,8 +724,8 @@ make clean-debug-pods NS=<namespace>   # Clean up debug pods interactively
   - This helps diagnose if connectivity issues are local to the node or cross-node networking problems
 - **Log Files Summary**: The report includes a concise summary of all log files with error counts and file paths, making it easy to identify which logs need attention
 - **View Related Logs Helper**: The `sgfp_view_logs.sh` script automatically extracts pod identifiers and searches all log files for pod-related lines, with options to view only errors or all logs
-- **Network Namespace Matching**: Attempts to match pod's network namespace using container ID (with fallback to pod UID) to handle AWS CNI's hashed namespace naming scheme
-- **Leak Detection**: Only flags empty network namespaces as issues if they're older than 1 hour (to avoid false positives from transient cleanup states)
+- **Enhanced Orphaned Namespace Detection**: Uses IP-based matching to accurately identify truly orphaned network namespaces by collecting actual IP addresses from namespaces and matching them against active pod IPs (eliminates false positives from interface-count-only checks)
+- **Process Counting**: Counts processes within each network namespace for additional context when determining if a namespace is truly orphaned
 - **Node Debug Pod**: The `sgfp_node_debug.sh` script can accept either a pod name (will find the node) or a node name directly.
 - **Output Directories**: All diagnostic output directories (`data/`, `reports/`, and legacy `sgfp_bundle_*`, `sgfp_diag_*`, `sgfp_api_diag_*`) are automatically ignored by git (see `.gitignore`).
 

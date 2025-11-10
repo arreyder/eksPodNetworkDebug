@@ -954,33 +954,89 @@ if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_netns_details.json" ]; then
   if jq -e 'length > 0' "$NODE_DIR/node_netns_details.json" >/dev/null 2>&1; then
     echo >> "$REPORT"
     NETNS_COUNT=$(jq -r 'length' "$NODE_DIR/node_netns_details.json" 2>/dev/null || echo "0")
-    EMPTY_NS=$(jq -r '[.[] | select(.interface_count == 0)] | length' "$NODE_DIR/node_netns_details.json" 2>/dev/null || echo "0")
     say "[INFO] Network namespaces: $NETNS_COUNT total"
     
-    if [ "$EMPTY_NS" != "0" ]; then
-      # Check for old empty namespaces (older than 1 hour - likely leaks)
+    # Enhanced orphaned namespace detection using IP-based matching
+    if [ -s "$NODE_DIR/node_pod_ip_map.txt" ] || [ -s "$NODE_DIR/node_pod_ipv6_map.txt" ]; then
+      echo >> "$REPORT"
+      say "[INFO] Enhanced orphaned namespace detection (IP-based matching):"
+      
       CURRENT_TIME=$(date +%s 2>/dev/null || echo "0")
-      if [ "$CURRENT_TIME" != "0" ]; then
-        OLD_EMPTY_NS=$(jq -r --arg now "$CURRENT_TIME" '[.[] | select(.interface_count == 0 and (($now | tonumber) - .mtime) > 3600)] | length' "$NODE_DIR/node_netns_details.json" 2>/dev/null || echo "0")
+      MATCHED_COUNT=0
+      ORPHANED_COUNT=0
+      ORPHANED_LIST=""
+      
+      # Process each namespace and match against pod IP map
+      while IFS='|' read -r ns_name ipv4_ips ipv6_ips interface_count proc_count mtime active; do
+        [ -z "$ns_name" ] && continue
         
-        if [ "$OLD_EMPTY_NS" != "0" ] && [ "$OLD_EMPTY_NS" != "null" ] && [ "$OLD_EMPTY_NS" != "" ]; then
-          say "[ISSUE] Found $OLD_EMPTY_NS network namespace(s) with no interfaces and older than 1 hour (likely leaks)"
-          # List the orphaned namespaces with their ages
-          jq -r --arg now "$CURRENT_TIME" '.[] | select(.interface_count == 0 and (($now | tonumber) - .mtime) > 3600) | "  - `\(.name)` (age: \(($now | tonumber) - .mtime | . / 3600 | floor)h \(($now | tonumber) - .mtime | . % 3600 / 60 | floor)m)"' "$NODE_DIR/node_netns_details.json" 2>/dev/null | while read -r line; do
-            say "$line"
-          done || true
-        elif [ "$EMPTY_NS" -gt 10 ]; then
-          say "[WARN] Found $EMPTY_NS network namespace(s) with no interfaces (may be in cleanup or detection issue)"
-        else
-          say "[INFO] Found $EMPTY_NS network namespace(s) with no interfaces (may be in cleanup)"
+        matched=0
+        matched_pod=""
+        
+        # Check IPv4 IPs against pod map
+        if [ -n "$ipv4_ips" ] && [ "$ipv4_ips" != "null" ] && [ -s "$NODE_DIR/node_pod_ip_map.txt" ]; then
+          for ip in $(echo "$ipv4_ips" | tr ',' ' '); do
+            [ -z "$ip" ] && continue
+            owner=$(grep -m1 "^$ip " "$NODE_DIR/node_pod_ip_map.txt" 2>/dev/null | awk '{print $2}' || echo "")
+            if [ -n "$owner" ]; then
+              matched=1
+              matched_pod="$owner"
+              break
+            fi
+          done
         fi
-      else
-        # Can't determine age, just report count
-        if [ "$EMPTY_NS" -gt 10 ]; then
-          say "[WARN] Found $EMPTY_NS network namespace(s) with no interfaces (may be in cleanup or detection issue)"
-        else
-          say "[INFO] Found $EMPTY_NS network namespace(s) with no interfaces (may be in cleanup)"
+        
+        # Check IPv6 IPs if no IPv4 match
+        if [ "$matched" -eq 0 ] && [ -n "$ipv6_ips" ] && [ "$ipv6_ips" != "null" ] && [ -s "$NODE_DIR/node_pod_ipv6_map.txt" ]; then
+          for ipv6 in $(echo "$ipv6_ips" | tr ',' ' '); do
+            [ -z "$ipv6" ] && continue
+            ipv6_normalized=$(echo "$ipv6" | tr -d '[]' || echo "$ipv6")
+            owner=$(grep -m1 "^$ipv6_normalized " "$NODE_DIR/node_pod_ipv6_map.txt" 2>/dev/null | awk '{print $2}' || echo "")
+            if [ -n "$owner" ]; then
+              matched=1
+              matched_pod="$owner"
+              break
+            fi
+          done
         fi
+        
+        if [ "$matched" -eq 1 ]; then
+          MATCHED_COUNT=$((MATCHED_COUNT + 1))
+        else
+          # No IP match - check if truly orphaned
+          age_seconds=0
+          if [ "$CURRENT_TIME" != "0" ] && [ "$mtime" != "0" ] && [ "$mtime" != "null" ]; then
+            age_seconds=$((CURRENT_TIME - mtime))
+          fi
+          age_hours=$((age_seconds / 3600))
+          age_mins=$(((age_seconds % 3600) / 60))
+          
+          if [ -z "$ipv4_ips" ] && [ -z "$ipv6_ips" ] || [ "$ipv4_ips" = "null" ] || [ "$ipv6_ips" = "null" ]; then
+            # No IPs at all - definitely orphaned if old enough
+            if [ "$age_seconds" -gt 3600 ]; then
+              ORPHANED_COUNT=$((ORPHANED_COUNT + 1))
+              ORPHANED_LIST="${ORPHANED_LIST}  - \`${ns_name}\` (no IPs, age: ${age_hours}h ${age_mins}m, processes: ${proc_count})"$'\n'
+            fi
+          elif [ "$proc_count" = "0" ] || [ "$proc_count" = "null" ] || [ -z "$proc_count" ]; then
+            # Has IPs but no matching pod AND no processes - likely orphaned if old enough
+            if [ "$age_seconds" -gt 3600 ]; then
+              ORPHANED_COUNT=$((ORPHANED_COUNT + 1))
+              ip_list=""
+              [ -n "$ipv4_ips" ] && [ "$ipv4_ips" != "null" ] && ip_list="${ip_list}${ipv4_ips}"
+              [ -n "$ipv6_ips" ] && [ "$ipv6_ips" != "null" ] && ip_list="${ip_list} ${ipv6_ips}"
+              ORPHANED_LIST="${ORPHANED_LIST}  - \`${ns_name}\` (IPs: ${ip_list}, no pod match, no processes, age: ${age_hours}h ${age_mins}m)"$'\n'
+            fi
+          fi
+        fi
+      done < <(jq -r '.[] | "\(.name)|\(.ips.ipv4 // [] | join(","))|\(.ips.ipv6 // [] | join(","))|\(.interface_count)|\(.process_count)|\(.mtime)|\(.active)"' "$NODE_DIR/node_netns_details.json" 2>/dev/null)
+      
+      say "  - Matched to pods: $MATCHED_COUNT"
+      say "  - Orphaned (no matching pod): $ORPHANED_COUNT"
+      
+      if [ "$ORPHANED_COUNT" -gt 0 ]; then
+        echo >> "$REPORT"
+        say "[ISSUE] Found $ORPHANED_COUNT orphaned network namespace(s) (no matching pod, safe to delete after verification):"
+        echo -n "$ORPHANED_LIST" >> "$REPORT"
       fi
     fi
   fi

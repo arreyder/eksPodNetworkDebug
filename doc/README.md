@@ -9,7 +9,7 @@ This directory contains detailed documentation for each diagnostic check perform
 3. **[Reverse Path Filtering](03-reverse-path-filtering.md)** - Validates rp_filter settings for pod ENI scenarios
 4. **[ENI/Instance Limits](04-eni-instance-limits.md)** - Checks ENI and IP limits vs current usage
 5. **[Security Group Validation](05-security-group-validation.md)** - Validates SGs on pod ENI vs expected SGs
-6. **[Network Namespace Leaks](06-network-namespace-leaks.md)** - Detects orphaned network namespaces
+6. **[Network Namespace Leaks](06-network-namespace-leaks.md)** - Detects truly orphaned network namespaces using IP-based matching (collects actual IP addresses and matches against active pod IPs)
 7. **[IP Address Conflicts](07-ip-address-conflicts.md)** - Detects duplicate IP addresses
 8. **[DNS Resolution](08-dns-resolution.md)** - Tests Kubernetes DNS resolution
 9. **[Resource Exhaustion](09-resource-exhaustion.md)** - Monitors file descriptors and memory
