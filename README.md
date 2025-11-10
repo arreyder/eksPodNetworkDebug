@@ -73,6 +73,35 @@ Each document explains what we check, why it matters, how we check it, and recom
 - `aws` CLI configured (and `AWS_REGION` set, e.g., `export AWS_REGION=us-west-2`)
 - Permissions: `ec2:DescribeNetworkInterfaces`, optionally CloudTrail `lookup-events`, optionally CloudWatch `GetMetricStatistics` (for NAT gateway SNAT port exhaustion detection)
 
+## Directory Structure
+
+All diagnostic data and reports are organized by **kubectl context** (cluster name) for easy identification:
+
+```
+data/
+  <cluster-context>/
+    sgfp_bundle_<cluster-context>_<pod-name>_YYYYMMDD_HHMMSS/
+      pod_<pod-name>/
+      node_<node-name>/
+      aws_<node-name>/
+      report.md
+    sgfp_diag_YYYYMMDD_HHMMSS/
+    sgfp_api_diag_YYYYMMDD_HHMMSS/
+    sgfp_baseline_<label>_YYYYMMDD_HHMMSS/
+    .sgfp_baseline_latest
+
+reports/
+  <cluster-context>/
+    sgfp_bundle_<cluster-context>_<pod-name>_YYYYMMDD_HHMMSS.md
+```
+
+**Benefits:**
+- **Cluster identification**: All data is tagged with the kubectl context, making it easy to identify which cluster the diagnostics belong to
+- **Organized structure**: Data files are in `data/`, reports are in `reports/`
+- **Context in output**: Console output and reports include the cluster context name
+
+The cluster context is automatically detected from `kubectl config current-context` and sanitized for use in directory names.
+
 ## Quick Start
 
 ### Option 1: All-in-One (Recommended)
@@ -81,6 +110,7 @@ Each document explains what we check, why it matters, how we check it, and recom
 export AWS_REGION=us-west-2
 
 # Run everything: collect, API diag, report, analyze, and display
+# Output will be organized by kubectl context
 ./sgfp_doctor.sh <pod-name> -n default --minutes 60
 ```
 
@@ -90,13 +120,17 @@ export AWS_REGION=us-west-2
 export AWS_REGION=us-west-2
 
 # 1) Collect a bundle for a pod (namespace default)
+# Output: data/<cluster-context>/sgfp_bundle_<cluster-context>_<pod-name>_YYYYMMDD_HHMMSS/
 ./sgfp_collect.sh -n default <pod-name>
 
 # 2) (Optional) CloudTrail ENI API diagnostics for last 60 minutes
+# Output: data/<cluster-context>/sgfp_api_diag_YYYYMMDD_HHMMSS/
 WINDOW_MINUTES=60 ./sgfp_api_diag.sh
 
 # 3) Generate a report for the bundle
-B=$(ls -dt sgfp_bundle_<pod-name>_* | head -1)
+# Output: data/<cluster-context>/sgfp_bundle_.../report.md
+#        reports/<cluster-context>/sgfp_bundle_..._YYYYMMDD_HHMMSS.md
+B=$(ls -dt data/*/sgfp_bundle_* 2>/dev/null | head -1)
 ./sgfp_report.sh "$B"
 
 # 4) Post analyze the bundle
@@ -121,10 +155,10 @@ make clean
 
 ## What gets collected
 
-Bundle structure (example):
+Bundle structure (example, organized by cluster context):
 
 ```
-sgfp_bundle_<pod>_<timestamp>/
+data/<cluster-context>/sgfp_bundle_<cluster-context>_<pod>_<timestamp>/
   pod_<pod>/
     pod_annotations.json
     pod_conditions.json
@@ -690,7 +724,7 @@ make clean-debug-pods NS=<namespace>   # Clean up debug pods interactively
 - **Network Namespace Matching**: Attempts to match pod's network namespace using container ID (with fallback to pod UID) to handle AWS CNI's hashed namespace naming scheme
 - **Leak Detection**: Only flags empty network namespaces as issues if they're older than 1 hour (to avoid false positives from transient cleanup states)
 - **Node Debug Pod**: The `sgfp_node_debug.sh` script can accept either a pod name (will find the node) or a node name directly.
-- **Output Directories**: All diagnostic output directories (`sgfp_bundle_*`, `sgfp_diag_*`, `sgfp_api_diag_*`) are automatically ignored by git (see `.gitignore`).
+- **Output Directories**: All diagnostic output directories (`data/`, `reports/`, and legacy `sgfp_bundle_*`, `sgfp_diag_*`, `sgfp_api_diag_*`) are automatically ignored by git (see `.gitignore`).
 
 ## Requirements
 

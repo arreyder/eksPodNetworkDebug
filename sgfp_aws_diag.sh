@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-NODE_DNS="${1:?usage: sgfp_aws_diag.sh <node-private-dns-or-name>}"
-OUT="sgfp_diag_$(date +%Y%m%d_%H%M%S)"
+NODE_DNS="${1:?usage: sgfp_aws_diag.sh <node-private-dns-or-name> [data-dir]}"
+DATA_DIR="${2:-data/unknown}"
+mkdir -p "$DATA_DIR"
+OUT="$DATA_DIR/sgfp_diag_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"
 
 log()  { printf "[AWS] %s\n" "$*"; }

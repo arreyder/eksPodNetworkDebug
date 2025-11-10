@@ -32,6 +32,7 @@ doctor:
 clean:
 	@echo "Cleaning up diagnostic output directories..."
 	@rm -rf sgfp_bundle_*/ sgfp_diag_*/ sgfp_api_diag_*/ sgfp_baseline_*/
+	@rm -rf data/ reports/
 	@echo "Done."
 
 clean-debug-pods:

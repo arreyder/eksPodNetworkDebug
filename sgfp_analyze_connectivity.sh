@@ -2073,10 +2073,11 @@ fi
 echo ""
 echo "=== CloudTrail API Diagnostics ==="
 
-# Try to find API diagnostics directory (same parent as bundle)
+# Try to find API diagnostics directory (same data directory as bundle)
 API_DIAG_DIR=""
-if [ -d "$(dirname "$BUNDLE")" ]; then
-  API_DIAG_DIR=$(ls -dt "$(dirname "$BUNDLE")"/sgfp_api_diag_* 2>/dev/null | head -1 || echo "")
+DATA_DIR=$(dirname "$BUNDLE" 2>/dev/null || echo "")
+if [ -n "$DATA_DIR" ] && [ -d "$DATA_DIR" ]; then
+  API_DIAG_DIR=$(ls -dt "$DATA_DIR"/sgfp_api_diag_* 2>/dev/null | head -1 || echo "")
 fi
 
 if [ -n "$API_DIAG_DIR" ] && [ -d "$API_DIAG_DIR" ]; then

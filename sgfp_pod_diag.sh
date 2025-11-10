@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-POD="${1:?usage: sgfp_pod_diag.sh <pod-name> [namespace]}"
+POD="${1:?usage: sgfp_pod_diag.sh <pod-name> [namespace] [data-dir]}"
 NS="${2:-default}"
-OUT="sgfp_diag_$(date +%Y%m%d_%H%M%S)"
+DATA_DIR="${3:-data/unknown}"
+mkdir -p "$DATA_DIR"
+OUT="$DATA_DIR/sgfp_diag_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"
 
 # 1) Basic pod state

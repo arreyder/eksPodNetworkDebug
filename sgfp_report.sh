@@ -2,7 +2,8 @@
 set -euo pipefail
 
 BUNDLE="${1:-}"
-if [ -z "$BUNDLE" ]; then echo "Usage: $0 <sgfp_bundle_dir>"; exit 1; fi
+REPORTS_DIR="${2:-}"
+if [ -z "$BUNDLE" ]; then echo "Usage: $0 <sgfp_bundle_dir> [reports-dir]"; exit 1; fi
 if [ ! -d "$BUNDLE" ]; then
   echo "ERROR: Bundle directory does not exist: $BUNDLE" >&2
   exit 1
@@ -18,9 +19,18 @@ if [ -z "$POD_DIR" ] || [ ! -d "$POD_DIR" ]; then
   exit 1
 fi
 
-# Extract pod name: bundle format is sgfp_bundle_<pod-name>_YYYYMMDD_HHMMSS
+# Extract cluster context from bundle path (data/<context>/sgfp_bundle_...)
+# Extract pod name: bundle format is sgfp_bundle_<context>_<pod-name>_YYYYMMDD_HHMMSS
+# Try to extract context from path first
+KUBECTL_CONTEXT="unknown"
+if echo "$BUNDLE" | grep -q "^data/"; then
+  KUBECTL_CONTEXT=$(echo "$BUNDLE" | sed 's|^data/\([^/]*\)/.*|\1|')
+fi
+# Extract pod name: bundle format is sgfp_bundle_<context>_<pod-name>_YYYYMMDD_HHMMSS
 # Match timestamp pattern (8 digits, underscore, 6 digits) at the end
-POD=$(basename "$BUNDLE" | sed 's/^sgfp_bundle_\(.*\)_[0-9]\{8\}_[0-9]\{6\}$/\1/')
+BUNDLE_BASENAME=$(basename "$BUNDLE")
+# Remove context prefix, then extract pod name
+POD=$(echo "$BUNDLE_BASENAME" | sed "s/^sgfp_bundle_${KUBECTL_CONTEXT}_//" | sed 's/_[0-9]\{8\}_[0-9]\{6\}$//')
 NODE="$(basename "${NODE_DIR:-}" | sed 's/^node_//')"
 
 POD_ANNO="$POD_DIR/pod_annotations.json"
@@ -54,6 +64,7 @@ BR_JSON="${AWS_DIR:+$AWS_DIR/_all_branch_enis_in_vpc.json}"
 say(){ echo "- $1" >> "$REPORT"; }
 
 echo "# SGFP Network Diagnostics Report" > "$REPORT"
+echo "Cluster: \`${KUBECTL_CONTEXT}\`" >> "$REPORT"
 echo "Pod: \`$POD\`" >> "$REPORT"
 [ -n "$NODE" ] && echo "Node: \`$NODE\`" >> "$REPORT"
 echo "Generated: \`$(date)\`" >> "$REPORT"
@@ -1742,9 +1753,10 @@ fi
 
 # CloudTrail API Diagnostics (if available)
 API_DIAG_DIR=""
-# Try to find the most recent API diag directory (same parent as bundle)
-if [ -d "$(dirname "$BUNDLE")" ]; then
-  API_DIAG_DIR=$(ls -dt "$(dirname "$BUNDLE")"/sgfp_api_diag_* 2>/dev/null | head -1 || echo "")
+# Try to find the most recent API diag directory (same data directory as bundle)
+DATA_DIR=$(dirname "$BUNDLE" 2>/dev/null || echo "")
+if [ -n "$DATA_DIR" ] && [ -d "$DATA_DIR" ]; then
+  API_DIAG_DIR=$(ls -dt "$DATA_DIR"/sgfp_api_diag_* 2>/dev/null | head -1 || echo "")
 fi
 
 if [ -n "$API_DIAG_DIR" ] && [ -d "$API_DIAG_DIR" ]; then
