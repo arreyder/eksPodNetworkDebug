@@ -19,13 +19,15 @@ MINUTES=$((2*24*60))
 REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
 SKIP_API=0
 API_DIR=""
+MARK_HEALTHY=0
+MARK_UNHEALTHY=0
 
 KUBECTL_CONTEXT=$(get_kubectl_context)
 DATA_DIR="data/${KUBECTL_CONTEXT}"
 REPORTS_DIR="reports/${KUBECTL_CONTEXT}"
 mkdir -p "$DATA_DIR" "$REPORTS_DIR"
 
-usage(){ echo "Usage: $0 <pod> [-n ns] [--minutes N|--days D] [--region R] [--skip-api] [--api-dir DIR]"; }
+usage(){ echo "Usage: $0 <pod> [-n ns] [--minutes N|--days D] [--region R] [--skip-api] [--api-dir DIR] [--mark-healthy] [--mark-unhealthy]"; }
 
 [ $# -lt 1 ] && { usage; exit 1; }
 POD="$1"; shift
@@ -37,6 +39,8 @@ while [ $# -gt 0 ]; do
     --region) REGION="${2:?}"; shift 2;;
     --skip-api) SKIP_API=1; shift ;;
     --api-dir) API_DIR="${2:?}"; shift 2;;
+    --mark-healthy) MARK_HEALTHY=1; shift ;;
+    --mark-unhealthy) MARK_UNHEALTHY=1; shift ;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown arg: $1"; usage; exit 1;;
   esac
@@ -56,8 +60,13 @@ if [ -n "${SGFP_BASELINE_DIR:-}" ] && [ -d "$SGFP_BASELINE_DIR" ]; then
 fi
 
 echo "[DOCTOR] Cluster: ${KUBECTL_CONTEXT}"
+[ "$MARK_HEALTHY" -eq 1 ] && echo "[DOCTOR] Will mark collection as HEALTHY and save as baseline"
+[ "$MARK_UNHEALTHY" -eq 1 ] && echo "[DOCTOR] Will mark collection as UNHEALTHY"
 echo "[DOCTOR] [1/6] Collecting diagnostics for pod '$POD' in ns '$NS'..."
-if ! ./sgfp_collect.sh -n "$NS" "$POD" 2>&1; then
+COLLECT_ARGS=(-n "$NS")
+[ "$MARK_HEALTHY" -eq 1 ] && COLLECT_ARGS+=("--mark-healthy")
+[ "$MARK_UNHEALTHY" -eq 1 ] && COLLECT_ARGS+=("--mark-unhealthy")
+if ! ./sgfp_collect.sh "${COLLECT_ARGS[@]}" "$POD" 2>&1; then
   echo "[DOCTOR] WARN: Collection had errors, but continuing..." >&2
 fi
 BUNDLE_DIR="$(ls -dt "$DATA_DIR"/sgfp_bundle_* 2>/dev/null | head -1 || true)"

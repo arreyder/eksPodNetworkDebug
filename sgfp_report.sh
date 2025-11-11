@@ -194,6 +194,33 @@ if [ -s "$POD_SGS" ]; then
   else
     say "[INFO] SG Validation: No expected SGs specified (checking actual SGs only)"
   fi
+  
+  # Check ENI readiness
+  if [ -s "$POD_DIR/pod_eni_readiness.txt" ]; then
+    ENI_READY=$(grep "^ReadyForTraffic=" "$POD_DIR/pod_eni_readiness.txt" 2>/dev/null | cut -d= -f2- || echo "false")
+    if [ "$ENI_READY" = "true" ]; then
+      say "[OK] ENI ready for traffic (type, status, SGs, and IP all configured)"
+    else
+      say "[ISSUE] ENI not ready for traffic"
+      if [ -s "$POD_DIR/pod_eni_readiness.txt" ]; then
+        grep -v "^ReadyForTraffic=" "$POD_DIR/pod_eni_readiness.txt" | sed 's/^/  - /' >> "$REPORT"
+      fi
+    fi
+  fi
+  
+  # Check security group rules are present and configured
+  if [ -s "$POD_DIR/pod_branch_eni_sgs_rules.json" ]; then
+    SG_RULES_COUNT=$(jq -r 'length' "$POD_DIR/pod_branch_eni_sgs_rules.json" 2>/dev/null || echo "0")
+    if [ "$SG_RULES_COUNT" -gt 0 ]; then
+      INGRESS_RULES_COUNT=$(jq -r '[.[].IpPermissions[]?] | length' "$POD_DIR/pod_branch_eni_sgs_rules.json" 2>/dev/null || echo "0")
+      EGRESS_RULES_COUNT=$(jq -r '[.[].IpPermissionsEgress[]?] | length' "$POD_DIR/pod_branch_eni_sgs_rules.json" 2>/dev/null || echo "0")
+      if [ "$INGRESS_RULES_COUNT" -gt 0 ] || [ "$EGRESS_RULES_COUNT" -gt 0 ]; then
+        say "[OK] Security group rules present: $INGRESS_RULES_COUNT ingress, $EGRESS_RULES_COUNT egress"
+      else
+        say "[WARN] Security groups attached but no ingress/egress rules found (may be default deny-all)"
+      fi
+    fi
+  fi
 fi
 
 # SecurityGroupPolicy CRD Compliance
@@ -1037,6 +1064,45 @@ if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_netns_details.json" ]; then
         echo >> "$REPORT"
         say "[ISSUE] Found $ORPHANED_COUNT orphaned network namespace(s) (no matching pod, safe to delete after verification):"
         echo -n "$ORPHANED_LIST" >> "$REPORT"
+      fi
+    fi
+    
+    # Check pod's network namespace completeness
+    POD_IP=$(grep "^POD_IP=" "$POD_DIR/pod_ip.txt" 2>/dev/null | cut -d= -f2- || echo "unknown")
+    if [ -n "$POD_IP" ] && [ "$POD_IP" != "unknown" ]; then
+      POD_NS_NAME=$(jq -r --arg ip "$POD_IP" '.[] | select(.ips.ipv4[]? == $ip) | .name' "$NODE_DIR/node_netns_details.json" 2>/dev/null | head -1 || echo "")
+      if [ -n "$POD_NS_NAME" ] && [ "$POD_NS_NAME" != "null" ]; then
+        echo >> "$REPORT"
+        say "[INFO] Pod network namespace: \`$POD_NS_NAME\`"
+        
+        POD_NS_COMPLETENESS=$(jq -r --arg name "$POD_NS_NAME" '.[] | select(.name == $name) | .completeness // {}' "$NODE_DIR/node_netns_details.json" 2>/dev/null || echo "{}")
+        if [ "$POD_NS_COMPLETENESS" != "{}" ] && [ "$POD_NS_COMPLETENESS" != "null" ]; then
+          DEFAULT_ROUTE=$(echo "$POD_NS_COMPLETENESS" | jq -r '.default_route // ""' 2>/dev/null || echo "")
+          ETH0_STATE=$(echo "$POD_NS_COMPLETENESS" | jq -r '.eth0_state // "NOT_FOUND"' 2>/dev/null || echo "NOT_FOUND")
+          ROUTE_COUNT=$(echo "$POD_NS_COMPLETENESS" | jq -r '.route_count // 0' 2>/dev/null || echo "0")
+          
+          if [ -n "$DEFAULT_ROUTE" ] && [ "$DEFAULT_ROUTE" != "null" ] && [ "$DEFAULT_ROUTE" != "" ]; then
+            say "[OK] Default route: $DEFAULT_ROUTE"
+          else
+            say "[ISSUE] Default route missing"
+          fi
+          
+          if [ "$ETH0_STATE" = "UP" ]; then
+            say "[OK] eth0 interface state: UP"
+          elif [ "$ETH0_STATE" = "NOT_FOUND" ]; then
+            say "[ISSUE] eth0 interface not found"
+          else
+            say "[ISSUE] eth0 interface state: $ETH0_STATE (expected: UP)"
+          fi
+          
+          if [ "$ROUTE_COUNT" -gt 0 ]; then
+            say "[OK] Route count: $ROUTE_COUNT"
+          else
+            say "[ISSUE] No routes found (expected at least default route)"
+          fi
+        else
+          say "[WARN] Network namespace completeness data not available"
+        fi
       fi
     fi
   fi

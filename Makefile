@@ -1,5 +1,5 @@
 
-.PHONY: collect api report analyze doctor clean clean-debug-pods node-debug view-logs quick-check baseline compare-baseline
+.PHONY: collect api report analyze doctor clean clean-debug-pods node-debug view-logs quick-check baseline compare-baseline check-sg-rules check-source-sgs analyze-pcap pod-tcpdump
 
 NS ?= default
 POD ?=
@@ -59,4 +59,28 @@ compare-baseline:
 		./sgfp_compare_baseline.sh $(BASELINE) $(INCIDENT); \
 	else \
 		./sgfp_compare_baseline.sh $(INCIDENT); \
+	fi
+
+check-sg-rules:
+	@[ -n "$(BUNDLE)" ] || (echo "BUNDLE required: make check-sg-rules BUNDLE=<bundle-dir>"; exit 1)
+	@./sgfp_check_sg_rules_for_cross_node.sh $(BUNDLE)
+
+check-source-sgs:
+	@[ -n "$(BUNDLE)" ] || (echo "BUNDLE required: make check-source-sgs BUNDLE=<bundle-dir>"; exit 1)
+	@./sgfp_check_source_pod_sgs.sh $(BUNDLE)
+
+analyze-pcap:
+	@[ -n "$(FILE)" ] || (echo "FILE required: make analyze-pcap FILE=<capture-file> [BUNDLE=<bundle-dir>]"; exit 1)
+	@if [ -n "$(BUNDLE)" ]; then \
+		./sgfp_analyze_pcap.sh $(FILE) $(BUNDLE); \
+	else \
+		./sgfp_analyze_pcap.sh $(FILE); \
+	fi
+
+pod-tcpdump:
+	@[ -n "$(POD)" ] || (echo "POD required: make pod-tcpdump POD=<pod> [NS=default] [ARGS=\"...\"]"; exit 1)
+	@if [ -n "$(ARGS)" ]; then \
+		./sgfp_pod_tcpdump.sh $(POD) $(NS) "$(ARGS)"; \
+	else \
+		./sgfp_pod_tcpdump.sh $(POD) $(NS); \
 	fi
