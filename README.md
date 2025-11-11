@@ -35,6 +35,10 @@ This toolkit collects comprehensive diagnostics for AWS EKS pods using Security 
 - **Baseline Comparison**: Compare baseline metrics with incident state to identify changes
 - **All-in-One Doctor Script**: Single command to collect, analyze, and report
 - **Consistent Output Format**: Uses `[PREFIX]` format for clear, parseable output
+- **Security Group Rules Analysis**: Analyzes security group ingress/egress rules to verify cross-node traffic is allowed
+- **Source Pod Security Group Validation**: Checks security groups of source pods attempting to connect to identify mismatches
+- **Packet Capture Analysis**: Analyzes tcpdump/pcap files with pod IP mapping to identify communicating pods and local vs remote traffic
+- **Network Traffic Capture**: Automated script to capture network traffic from a pod's network namespace using tcpdump
 
 ## Documentation
 
@@ -57,6 +61,11 @@ Detailed documentation for each diagnostic check is available in the [`doc/`](do
 - [IPAMD State Analysis](doc/26-ipamd-state-analysis.md)
 - [Pod Events Analysis](doc/27-pod-events-analysis.md)
 - [CloudTrail API Diagnostics](doc/28-cloudtrail-api-diagnostics.md)
+- [AWS VPC CNI ConfigMap Settings](doc/29-aws-vpc-cni-configmap.md)
+- [Security Group Rules Analysis](doc/30-security-group-rules-analysis.md)
+- [Source Pod Security Group Validation](doc/31-source-pod-security-groups.md)
+- [Packet Capture Analysis](doc/32-packet-capture-analysis.md)
+- [Network Traffic Capture](doc/33-network-traffic-capture.md)
 - [Network Namespace Leaks](doc/06-network-namespace-leaks.md)
 - [DNS Resolution](doc/08-dns-resolution.md)
 - [SYN_SENT Detection](doc/10-syn-sent-detection.md)
@@ -185,6 +194,7 @@ data/<cluster-context>/sgfp_bundle_<cluster-context>_<pod>_<timestamp>/
     pod_branch_eni_describe.json
     pod_branch_eni_sgs.txt              # Actual SGs on pod ENI
     pod_branch_eni_sgs_details.json     # SG IDs, names, descriptions
+    pod_branch_eni_sgs_rules.json      # Full SG rules (including IpPermissions for ingress/egress)
     pod_parent_trunk_eni.txt
     pod_expected_sgs.txt                 # Expected SGs from pod annotation
     deployment_expected_sgs.txt          # Expected SGs from deployment annotation
@@ -673,6 +683,133 @@ The report shows:
 - Expected SGs (if specified)
 - Validation status: Match, Mismatch, or No expected SGs specified
 
+## Security Group Rules Analysis
+
+The toolkit includes scripts to analyze security group rules for cross-node traffic:
+
+### `sgfp_check_sg_rules_for_cross_node.sh` - Check Security Group Rules for Cross-Node Traffic
+
+Analyzes security group ingress rules to verify if cross-node source IPs are allowed for a specific port.
+
+```bash
+./sgfp_check_sg_rules_for_cross_node.sh <bundle-dir>
+```
+
+**What it does:**
+- Extracts allowed security groups for a specific port (e.g., port 6000) from the pod's ENI security group rules
+- Identifies source IPs attempting to connect (from conntrack data)
+- Checks if source IPs are allowed by CIDR ranges or security group references
+- Reports which source IPs are blocked and which are allowed
+
+**Output:**
+- Lists allowed security groups for the port
+- Shows source IPs and whether they're allowed or blocked
+- Provides recommendations for fixing blocked traffic
+
+### `sgfp_check_source_pod_sgs.sh` - Check Source Pod Security Groups
+
+Checks security groups of source pods attempting to connect to identify mismatches with allowed security groups.
+
+```bash
+./sgfp_check_source_pod_sgs.sh <bundle-dir>
+```
+
+**What it does:**
+- Extracts allowed security groups for the target port from security group rules
+- Identifies source pods attempting to connect (from conntrack data)
+- Retrieves security groups from source pods (pod ENI or node security groups)
+- Compares source pod security groups against allowed list
+- Reports which source pods have matching security groups and which don't
+
+**Output:**
+- Lists allowed security groups for the port
+- Shows each source pod and its security groups
+- Indicates if source pod security groups match the allowed list
+- Provides recommendations for fixing mismatches
+
+**Note:** If source pods have been deleted/recreated since diagnostic collection, the script may not be able to retrieve their security groups. Run diagnostics while source pods are active for accurate results.
+
+## Packet Capture Analysis
+
+The toolkit includes scripts to analyze packet capture files and capture network traffic:
+
+### `sgfp_analyze_pcap.sh` - Analyze Packet Capture Files
+
+Analyzes tcpdump/pcap files with pod IP mapping to identify communicating pods and traffic patterns.
+
+```bash
+./sgfp_analyze_pcap.sh <capture-file> [bundle-dir]
+```
+
+**What it does:**
+- Analyzes packet capture files (text format from `tcpdump` or binary `.pcap` files)
+- Maps IP addresses to pod names using diagnostic bundle data
+- Identifies source and destination pods
+- Analyzes traffic patterns, connection states, and errors
+- Provides pod-specific analysis for the target pod
+
+**Output:**
+- Protocol breakdown
+- Top source and destination IPs (with pod mapping)
+- Connection state analysis
+- Error analysis (SYN, RST, etc.)
+- Pod-specific traffic analysis
+
+### `sgfp_analyze_pcap_with_pod_mapping.sh` - Analyze Packet Capture with Pod Mapping
+
+Enhanced packet capture analysis with detailed pod IP mapping and local vs remote traffic breakdown.
+
+```bash
+./sgfp_analyze_pcap_with_pod_mapping.sh <capture-file> <bundle-dir>
+```
+
+**What it does:**
+- Extracts all IP addresses from packet capture
+- Maps IPs to pod names using diagnostic bundle
+- Identifies local (same node) vs remote (cross-node) traffic
+- Provides summary of communicating pods
+- Analyzes traffic patterns by pod
+
+**Output:**
+- Summary of communicating pods
+- Local vs remote traffic breakdown
+- Pod-to-pod communication matrix
+
+### `sgfp_pod_tcpdump.sh` - Capture Network Traffic from Pod
+
+Automated script to capture network traffic from a pod's network namespace using tcpdump.
+
+```bash
+./sgfp_pod_tcpdump.sh <pod-name> [namespace] [tcpdump-args]
+```
+
+**What it does:**
+- Finds the node where the pod is running
+- Creates a debug pod on the same node with `sysadmin` profile
+- Extracts network namespace name from diagnostic reports (if available)
+- Provides instructions for running tcpdump in the pod's network namespace
+- Automatically installs tcpdump if needed
+
+**Usage:**
+```bash
+# Basic capture (port 6000)
+./sgfp_pod_tcpdump.sh be-conductor default
+
+# Custom tcpdump arguments
+./sgfp_pod_tcpdump.sh be-conductor default "-i any -n -v port 6000"
+
+# Capture all traffic
+./sgfp_pod_tcpdump.sh be-conductor default "-i any -n -v"
+```
+
+**Output:**
+- Creates a debug pod on the target node
+- Provides commands to enter the pod's network namespace
+- Instructions for installing tcpdump if needed
+- Commands to capture traffic from within the pod's network namespace or on the veth interface
+
+**Note:** The `sgfp_doctor.sh` script automatically outputs the tcpdump command for the pod at the end of its run.
+
 ## Output Format
 
 All scripts use a consistent `[PREFIX]` output format:
@@ -704,6 +841,10 @@ make view-logs BUNDLE=<dir>            # View pod-related log lines
 make quick-check POD=<pod> NS=default  # Quick pod ENI status check
 make baseline [LABEL=<label>]         # Capture baseline metrics snapshot
 make compare-baseline INCIDENT=<dir> [BASELINE=<dir>]  # Compare baseline vs incident (uses saved baseline if not specified)
+make check-sg-rules BUNDLE=<dir>      # Check security group rules for cross-node traffic
+make check-source-sgs BUNDLE=<dir>    # Check source pod security groups
+make analyze-pcap FILE=<capture> [BUNDLE=<dir>]  # Analyze packet capture file
+make pod-tcpdump POD=<pod> [NS=default] [ARGS="..."]  # Capture network traffic from pod
 make clean                             # Remove all diagnostic output directories
 make clean-debug-pods NS=<namespace>   # Clean up debug pods interactively
 ```

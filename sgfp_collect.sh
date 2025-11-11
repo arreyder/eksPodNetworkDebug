@@ -97,11 +97,19 @@ if [ -s "$LATEST/pod_annotations.json" ] && jq -e 'has("vpc.amazonaws.com/pod-en
             SG_ID_LIST=$(echo "$SG_ID_LIST" | sed 's/^ //')  # trim leading space
             if [ -n "$SG_ID_LIST" ]; then
               if [ -n "${AWS_REGION:-}" ]; then
+                # Get SG details (IDs, names, descriptions)
                 aws ec2 describe-security-groups --region "$AWS_REGION" --group-ids $SG_ID_LIST \
                   --query 'SecurityGroups[].[GroupId,GroupName,Description]' --output json > "$LATEST/pod_branch_eni_sgs_details.json" 2>/dev/null || echo "[]" > "$LATEST/pod_branch_eni_sgs_details.json"
+                # Get full SG rules (including IpPermissions for ingress/egress)
+                aws ec2 describe-security-groups --region "$AWS_REGION" --group-ids $SG_ID_LIST \
+                  --output json > "$LATEST/pod_branch_eni_sgs_rules.json" 2>/dev/null || echo "[]" > "$LATEST/pod_branch_eni_sgs_rules.json"
               else
+                # Get SG details (IDs, names, descriptions)
                 aws ec2 describe-security-groups --group-ids $SG_ID_LIST \
                   --query 'SecurityGroups[].[GroupId,GroupName,Description]' --output json > "$LATEST/pod_branch_eni_sgs_details.json" 2>/dev/null || echo "[]" > "$LATEST/pod_branch_eni_sgs_details.json"
+                # Get full SG rules (including IpPermissions for ingress/egress)
+                aws ec2 describe-security-groups --group-ids $SG_ID_LIST \
+                  --output json > "$LATEST/pod_branch_eni_sgs_rules.json" 2>/dev/null || echo "[]" > "$LATEST/pod_branch_eni_sgs_rules.json"
               fi
             else
               echo "[]" > "$LATEST/pod_branch_eni_sgs_details.json"

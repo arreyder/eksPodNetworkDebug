@@ -33,6 +33,10 @@ This directory contains detailed documentation for each diagnostic check perform
 27. **[Pod Events Analysis](27-pod-events-analysis.md)** - Analyzes Kubernetes pod events for network-related issues and failures
 28. **[CloudTrail API Diagnostics](28-cloudtrail-api-diagnostics.md)** - Analyzes CloudTrail events for ENI-related API errors, throttles, and issues
 29. **[AWS VPC CNI ConfigMap Settings](29-aws-vpc-cni-configmap.md)** - Collects and reports AWS VPC CNI configuration settings (branch-eni-cooldown, warm IP targets, network policy controller, etc.)
+30. **[Security Group Rules Analysis](30-security-group-rules-analysis.md)** - Analyzes security group ingress rules to verify if cross-node source IPs are allowed for a specific port
+31. **[Source Pod Security Group Validation](31-source-pod-security-groups.md)** - Checks security groups of source pods attempting to connect to identify mismatches with allowed security groups
+32. **[Packet Capture Analysis](32-packet-capture-analysis.md)** - Analyzes tcpdump/pcap files with pod IP mapping to identify communicating pods and traffic patterns
+33. **[Network Traffic Capture](33-network-traffic-capture.md)** - Automated script to capture network traffic from a pod's network namespace using tcpdump
 
 ## Document Structure
 
