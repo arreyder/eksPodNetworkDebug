@@ -9,7 +9,7 @@ This directory contains detailed documentation for each diagnostic check perform
 3. **[Reverse Path Filtering](03-reverse-path-filtering.md)** - Validates rp_filter settings for pod ENI scenarios
 4. **[ENI/Instance Limits](04-eni-instance-limits.md)** - Checks ENI and IP limits vs current usage
 5. **[Security Group Validation](05-security-group-validation.md)** - Validates SGs on pod ENI vs expected SGs
-6. **[Network Namespace Leaks](06-network-namespace-leaks.md)** - Detects orphaned network namespaces
+6. **[Network Namespace Leaks](06-network-namespace-leaks.md)** - Detects truly orphaned network namespaces using IP-based matching (collects actual IP addresses and matches against active pod IPs)
 7. **[IP Address Conflicts](07-ip-address-conflicts.md)** - Detects duplicate IP addresses
 8. **[DNS Resolution](08-dns-resolution.md)** - Tests Kubernetes DNS resolution
 9. **[Resource Exhaustion](09-resource-exhaustion.md)** - Monitors file descriptors and memory
@@ -32,6 +32,7 @@ This directory contains detailed documentation for each diagnostic check perform
 26. **[IPAMD State Analysis](26-ipamd-state-analysis.md)** - Analyzes IPAMD warm pool configuration and branch ENI counts on trunk ENIs
 27. **[Pod Events Analysis](27-pod-events-analysis.md)** - Analyzes Kubernetes pod events for network-related issues and failures
 28. **[CloudTrail API Diagnostics](28-cloudtrail-api-diagnostics.md)** - Analyzes CloudTrail events for ENI-related API errors, throttles, and issues
+29. **[AWS VPC CNI ConfigMap Settings](29-aws-vpc-cni-configmap.md)** - Collects and reports AWS VPC CNI configuration settings (branch-eni-cooldown, warm IP targets, network policy controller, etc.)
 
 ## Document Structure
 

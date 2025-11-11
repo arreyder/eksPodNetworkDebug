@@ -463,140 +463,116 @@ if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_netns_details.json" ]; then
     NETNS_COUNT=$(jq -r 'length' "$NODE_DIR/node_netns_details.json" 2>/dev/null || echo "0")
     echo "[INFO] Found $NETNS_COUNT network namespace(s) on node"
     
-    # Check for namespaces with no interfaces (potential leaks)
-    # Note: Some namespaces might show 0 interfaces if they're in cleanup or we can't access them properly
-    # Only flag as issue if we have a significant number or if they're old
-    EMPTY_NS=$(jq -r '[.[] | select(.interface_count == 0)] | length' "$NODE_DIR/node_netns_details.json" 2>/dev/null || echo "0")
-    if [ "$EMPTY_NS" != "0" ]; then
-      # Check if any empty namespaces are old (more than 1 hour old) - these are more likely to be leaks
+    # Enhanced orphaned namespace detection using IP-based matching
+    if [ -s "$NODE_DIR/node_pod_ip_map.txt" ] || [ -s "$NODE_DIR/node_pod_ipv6_map.txt" ]; then
+      echo ""
+      echo "=== Enhanced Orphaned Namespace Detection (IP-based matching) ==="
+      
       CURRENT_TIME=$(date +%s 2>/dev/null || echo "0")
-      if [ "$CURRENT_TIME" != "0" ]; then
-        OLD_EMPTY_NS=$(jq -r --arg now "$CURRENT_TIME" '[.[] | select(.interface_count == 0 and (($now | tonumber) - .mtime) > 3600)] | length' "$NODE_DIR/node_netns_details.json" 2>/dev/null || echo "0")
+      MATCHED_NS_TMP=$(mktemp)
+      ORPHANED_NS_TMP=$(mktemp)
+      ORPHANED_NS_LIST_TMP=$(mktemp)
+      echo "0" > "$MATCHED_NS_TMP"
+      echo "0" > "$ORPHANED_NS_TMP"
+      echo "" > "$ORPHANED_NS_LIST_TMP"
+      
+      # Process each namespace
+      while IFS='|' read -r ns_name ipv4_ips ipv6_ips interface_count proc_count mtime active; do
+        [ -z "$ns_name" ] && continue
         
-        if [ "$OLD_EMPTY_NS" != "0" ] && [ "$OLD_EMPTY_NS" != "null" ] && [ "$OLD_EMPTY_NS" != "" ]; then
-          echo "[ISSUE] Found $OLD_EMPTY_NS network namespace(s) with no interfaces and older than 1 hour (likely leaks)"
-          jq -r --arg now "$CURRENT_TIME" '.[] | select(.interface_count == 0 and (($now | tonumber) - .mtime) > 3600) | "  - \(.name) (age: \(($now | tonumber) - .mtime)s)"' "$NODE_DIR/node_netns_details.json" 2>/dev/null || true
-          issues=$((issues+1))
-        elif [ "$EMPTY_NS" -gt 10 ]; then
-          # If we have many empty namespaces, flag it as a potential issue
-          echo "[WARN] Found $EMPTY_NS network namespace(s) with no interfaces (may be in cleanup or detection issue)"
-          warnings=$((warnings+1))
-        else
-          echo "[INFO] Found $EMPTY_NS network namespace(s) with no interfaces (may be in cleanup)"
+        matched=0
+        matched_pod=""
+        
+        # Check IPv4 IPs against pod map
+        if [ -n "$ipv4_ips" ] && [ "$ipv4_ips" != "null" ] && [ -s "$NODE_DIR/node_pod_ip_map.txt" ]; then
+          for ip in $(echo "$ipv4_ips" | tr ',' ' '); do
+            [ -z "$ip" ] && continue
+            owner=$(grep -m1 "^$ip " "$NODE_DIR/node_pod_ip_map.txt" 2>/dev/null | awk '{print $2}' || echo "")
+            if [ -n "$owner" ]; then
+              matched=1
+              matched_pod="$owner"
+              break
+            fi
+          done
         fi
-      else
-        # Can't determine age, just report count
-        if [ "$EMPTY_NS" -gt 10 ]; then
-          echo "[WARN] Found $EMPTY_NS network namespace(s) with no interfaces (may be in cleanup or detection issue)"
-          warnings=$((warnings+1))
-        else
-          echo "[INFO] Found $EMPTY_NS network namespace(s) with no interfaces (may be in cleanup)"
+        
+        # Check IPv6 IPs if no IPv4 match
+        if [ "$matched" -eq 0 ] && [ -n "$ipv6_ips" ] && [ "$ipv6_ips" != "null" ] && [ -s "$NODE_DIR/node_pod_ipv6_map.txt" ]; then
+          for ipv6 in $(echo "$ipv6_ips" | tr ',' ' '); do
+            [ -z "$ipv6" ] && continue
+            # Normalize IPv6 (remove brackets if present)
+            ipv6_normalized=$(echo "$ipv6" | tr -d '[]' || echo "$ipv6")
+            owner=$(grep -m1 "^$ipv6_normalized " "$NODE_DIR/node_pod_ipv6_map.txt" 2>/dev/null | awk '{print $2}' || echo "")
+            if [ -n "$owner" ]; then
+              matched=1
+              matched_pod="$owner"
+              break
+            fi
+          done
         fi
-      fi
-    fi
-    
-    # Get pod UID and try to match against network namespace
-    # AWS VPC CNI uses container ID (sandbox ID) for namespace names, not pod UID directly
-    POD_UID=$(grep "^UID=" "$POD_DIR/pod_timing.txt" 2>/dev/null | cut -d= -f2- || echo "")
-    
-    # Try to get container ID from pod status (infra container)
-    POD_CONTAINER_ID=""
-    if [ -s "$POD_DIR/pod_full.json" ]; then
-      # Try multiple methods to get container ID:
-      # 1. Look for infra/pause container in containerStatuses
-      POD_CONTAINER_ID=$(jq -r '.status.containerStatuses[]? | select(.name | test("POD|infra|pause")) | .containerID // empty' "$POD_DIR/pod_full.json" 2>/dev/null | head -1 || echo "")
-      
-      # 2. If not found, try initContainers (some setups use init containers)
-      if [ -z "$POD_CONTAINER_ID" ] || [ "$POD_CONTAINER_ID" = "null" ] || [ "$POD_CONTAINER_ID" = "" ]; then
-        POD_CONTAINER_ID=$(jq -r '.status.initContainerStatuses[]? | select(.name | test("POD|infra|pause")) | .containerID // empty' "$POD_DIR/pod_full.json" 2>/dev/null | head -1 || echo "")
-      fi
-      
-      # 3. If still not found, get the first container's ID (fallback)
-      if [ -z "$POD_CONTAINER_ID" ] || [ "$POD_CONTAINER_ID" = "null" ] || [ "$POD_CONTAINER_ID" = "" ]; then
-        POD_CONTAINER_ID=$(jq -r '.status.containerStatuses[0]? | .containerID // empty' "$POD_DIR/pod_full.json" 2>/dev/null | head -1 || echo "")
-      fi
-      
-      # Remove container runtime prefix (e.g., "containerd://" or "docker://")
-      if [ -n "$POD_CONTAINER_ID" ] && [ "$POD_CONTAINER_ID" != "null" ] && [ "$POD_CONTAINER_ID" != "" ]; then
-        POD_CONTAINER_ID=$(echo "$POD_CONTAINER_ID" | sed 's|^[^:]*://||' || echo "$POD_CONTAINER_ID")
-      fi
-    fi
-    
-    POD_NS_FOUND=0
-    POD_NS_NAME=""
-    POD_NS_MTIME="0"
-    
-    # AWS VPC CNI network namespaces are typically named with "cni-" prefix followed by container ID hash
-    # The format is usually: cni-<hash> where hash is derived from container ID
-    # Try matching by container ID first (most reliable)
-    if [ -n "$POD_CONTAINER_ID" ] && [ "$POD_CONTAINER_ID" != "null" ] && [ "$POD_CONTAINER_ID" != "" ]; then
-      # Container IDs are usually 64-character hashes (sha256)
-      # AWS CNI may use a hash of the container ID, so try multiple approaches:
-      # 1. Try matching last 12 characters (common short ID format)
-      CONTAINER_ID_SHORT=$(echo "$POD_CONTAINER_ID" | tail -c 13 | head -c 12 || echo "$POD_CONTAINER_ID")
-      POD_NS_NAME=$(jq -r --arg cid "$CONTAINER_ID_SHORT" '.[] | select(.name | contains($cid)) | .name' "$NODE_DIR/node_netns_details.json" 2>/dev/null | head -1 || echo "")
-      
-      # 2. If not found, try matching any part of the container ID (CNI may hash it differently)
-      if [ -z "$POD_NS_NAME" ]; then
-        # Try matching first 12 characters
-        CONTAINER_ID_FIRST=$(echo "$POD_CONTAINER_ID" | head -c 12 || echo "")
-        POD_NS_NAME=$(jq -r --arg cid "$CONTAINER_ID_FIRST" '.[] | select(.name | contains($cid)) | .name' "$NODE_DIR/node_netns_details.json" 2>/dev/null | head -1 || echo "")
-      fi
-      
-      # 3. Try full container ID match (unlikely but possible)
-      if [ -z "$POD_NS_NAME" ]; then
-        POD_NS_NAME=$(jq -r --arg cid "$POD_CONTAINER_ID" '.[] | select(.name | contains($cid)) | .name' "$NODE_DIR/node_netns_details.json" 2>/dev/null | head -1 || echo "")
-      fi
-      
-      # 4. If still not found, the namespace name might be a hash of the container ID
-      # In that case, we can't match it directly, but we can note that we tried
-      if [ -z "$POD_NS_NAME" ] && [ -n "$POD_CONTAINER_ID" ]; then
-        # Debug: log that we have container ID but couldn't match
-        echo "[INFO] Container ID found: ${POD_CONTAINER_ID:0:12}... (but namespace not matched - may use hashed format)"
-      fi
-    fi
-    
-    # Fallback: try matching by pod UID (less reliable for AWS CNI)
-    if [ -z "$POD_NS_NAME" ] && [ -n "$POD_UID" ]; then
-      # Try exact UID match
-      POD_NS_NAME=$(jq -r --arg uid "$POD_UID" '.[] | select(.name == $uid) | .name' "$NODE_DIR/node_netns_details.json" 2>/dev/null | head -1 || echo "")
-      if [ -z "$POD_NS_NAME" ]; then
-        # Try partial match (UID might be part of namespace name)
-        POD_NS_NAME=$(jq -r --arg uid "$POD_UID" '.[] | select(.name | contains($uid)) | .name' "$NODE_DIR/node_netns_details.json" 2>/dev/null | head -1 || echo "")
-      fi
-    fi
-    
-    if [ -n "$POD_NS_NAME" ]; then
-      POD_NS_FOUND=1
-      POD_NS_MTIME=$(jq -r --arg name "$POD_NS_NAME" '.[] | select(.name == $name) | .mtime' "$NODE_DIR/node_netns_details.json" 2>/dev/null || echo "0")
-    fi
-    
-    if [ "$POD_NS_FOUND" = "0" ]; then
-      echo "[WARN] Pod network namespace not found (pod may not have network setup yet or namespace name doesn't match UID)"
-      warnings=$((warnings+1))
-    else
-      echo "[OK] Pod network namespace found: $POD_NS_NAME"
-      # Get namespace creation time and compare to pod creation
-      POD_CREATED=$(grep "^CREATED=" "$POD_DIR/pod_timing.txt" 2>/dev/null | cut -d= -f2- || echo "")
-      if [ -n "$POD_CREATED" ] && [ "$POD_CREATED" != "unknown" ] && [ "$POD_NS_MTIME" != "0" ]; then
-        # Convert pod creation time to epoch (handle both GNU and BSD date)
-        if date --version >/dev/null 2>&1; then
-          POD_CREATED_EPOCH=$(date -d "$POD_CREATED" +%s 2>/dev/null || echo "0")
+        
+        # Determine if orphaned
+        if [ "$matched" -eq 1 ]; then
+          MATCHED_NS=$(cat "$MATCHED_NS_TMP")
+          MATCHED_NS=$((MATCHED_NS + 1))
+          echo "$MATCHED_NS" > "$MATCHED_NS_TMP"
+          echo "[OK] $ns_name -> $matched_pod (processes: $proc_count)"
         else
-          POD_CREATED_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$POD_CREATED" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "$POD_CREATED" +%s 2>/dev/null || echo "0")
-        fi
-        if [ "$POD_CREATED_EPOCH" != "0" ] && [ "$POD_NS_MTIME" != "0" ]; then
-          NS_DELAY=$((POD_NS_MTIME - POD_CREATED_EPOCH))
-          if [ "$NS_DELAY" -lt 0 ]; then
-            echo "[WARN] Network namespace created before pod (timing anomaly)"
-            warnings=$((warnings+1))
-          elif [ "$NS_DELAY" -gt 60 ]; then
-            echo "[ISSUE] Network namespace creation delay: ${NS_DELAY}s after pod creation (>60s)"
-            issues=$((issues+1))
+          # No IP match - check if truly orphaned
+          age_seconds=0
+          if [ "$CURRENT_TIME" != "0" ] && [ "$mtime" != "0" ] && [ "$mtime" != "null" ]; then
+            age_seconds=$((CURRENT_TIME - mtime))
+          fi
+          age_hours=$((age_seconds / 3600))
+          age_mins=$(((age_seconds % 3600) / 60))
+          
+          if [ -z "$ipv4_ips" ] && [ -z "$ipv6_ips" ] || [ "$ipv4_ips" = "null" ] || [ "$ipv6_ips" = "null" ]; then
+            # No IPs at all - definitely orphaned if old enough
+            if [ "$age_seconds" -gt 3600 ]; then
+              ORPHANED_NS=$(cat "$ORPHANED_NS_TMP")
+              ORPHANED_NS=$((ORPHANED_NS + 1))
+              echo "$ORPHANED_NS" > "$ORPHANED_NS_TMP"
+              echo "  - $ns_name (no IPs, age: ${age_hours}h ${age_mins}m, processes: $proc_count)" >> "$ORPHANED_NS_LIST_TMP"
+              echo "[ORPHAN] $ns_name - no IPs, age: ${age_hours}h ${age_mins}m, processes: $proc_count"
+            fi
+          elif [ "$proc_count" = "0" ] || [ "$proc_count" = "null" ] || [ -z "$proc_count" ]; then
+            # Has IPs but no matching pod AND no processes - likely orphaned if old enough
+            if [ "$age_seconds" -gt 3600 ]; then
+              ORPHANED_NS=$(cat "$ORPHANED_NS_TMP")
+              ORPHANED_NS=$((ORPHANED_NS + 1))
+              echo "$ORPHANED_NS" > "$ORPHANED_NS_TMP"
+              ip_list=""
+              [ -n "$ipv4_ips" ] && [ "$ipv4_ips" != "null" ] && ip_list="${ip_list}${ipv4_ips}"
+              [ -n "$ipv6_ips" ] && [ "$ipv6_ips" != "null" ] && ip_list="${ip_list} ${ipv6_ips}"
+              echo "  - $ns_name (IPs: $ip_list, no pod match, no processes, age: ${age_hours}h ${age_mins}m)" >> "$ORPHANED_NS_LIST_TMP"
+              echo "[ORPHAN] $ns_name - IPs don't match any pod, no processes, age: ${age_hours}h ${age_mins}m"
+            fi
           else
-            echo "[OK] Network namespace created ${NS_DELAY}s after pod creation"
+            # Has IPs, no pod match, but has processes - investigate
+            echo "[WARN] $ns_name - IPs don't match any pod but has $proc_count process(es) - investigate"
+            warnings=$((warnings+1))
           fi
         fi
+      done < <(jq -r '.[] | "\(.name)|\(.ips.ipv4 // [] | join(","))|\(.ips.ipv6 // [] | join(","))|\(.interface_count)|\(.process_count)|\(.mtime)|\(.active)"' "$NODE_DIR/node_netns_details.json" 2>/dev/null)
+      
+      # Read results from temp files
+      MATCHED_NS=$(cat "$MATCHED_NS_TMP" 2>/dev/null || echo "0")
+      ORPHANED_NS=$(cat "$ORPHANED_NS_TMP" 2>/dev/null || echo "0")
+      ORPHANED_NS_LIST=$(cat "$ORPHANED_NS_LIST_TMP" 2>/dev/null || echo "")
+      
+      # Cleanup
+      rm -f "$MATCHED_NS_TMP" "$ORPHANED_NS_TMP" "$ORPHANED_NS_LIST_TMP" 2>/dev/null || true
+      
+      # Summary
+      echo ""
+      echo "[INFO] Namespace matching summary:"
+      echo "  - Matched to pods: $MATCHED_NS"
+      echo "  - Orphaned (safe to delete): $ORPHANED_NS"
+      
+      if [ "$ORPHANED_NS" -gt 0 ]; then
+        echo "[ISSUE] Found $ORPHANED_NS orphaned network namespace(s) (no matching pod, safe to delete)"
+        echo "$ORPHANED_NS_LIST"
+        issues=$((issues+1))
       fi
     fi
   fi
@@ -2073,10 +2049,11 @@ fi
 echo ""
 echo "=== CloudTrail API Diagnostics ==="
 
-# Try to find API diagnostics directory (same parent as bundle)
+# Try to find API diagnostics directory (same data directory as bundle)
 API_DIAG_DIR=""
-if [ -d "$(dirname "$BUNDLE")" ]; then
-  API_DIAG_DIR=$(ls -dt "$(dirname "$BUNDLE")"/sgfp_api_diag_* 2>/dev/null | head -1 || echo "")
+DATA_DIR=$(dirname "$BUNDLE" 2>/dev/null || echo "")
+if [ -n "$DATA_DIR" ] && [ -d "$DATA_DIR" ]; then
+  API_DIAG_DIR=$(ls -dt "$DATA_DIR"/sgfp_api_diag_* 2>/dev/null | head -1 || echo "")
 fi
 
 if [ -n "$API_DIAG_DIR" ] && [ -d "$API_DIAG_DIR" ]; then

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-POD="${1:?usage: sgfp_pod_diag.sh <pod-name> [namespace]}"
+POD="${1:?usage: sgfp_pod_diag.sh <pod-name> [namespace] [data-dir]}"
 NS="${2:-default}"
-OUT="sgfp_diag_$(date +%Y%m%d_%H%M%S)"
+DATA_DIR="${3:-data/unknown}"
+mkdir -p "$DATA_DIR"
+OUT="$DATA_DIR/sgfp_diag_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"
 
 # 1) Basic pod state
@@ -20,9 +22,11 @@ kubectl -n "$NS" get events --field-selector involvedObject.name="$POD" --sort-b
 POD_CREATED=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null || echo "")
 POD_STARTED=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.startTime}' 2>/dev/null || echo "")
 POD_UID=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.metadata.uid}' 2>/dev/null || echo "")
+POD_TERMINATION_GRACE=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.spec.terminationGracePeriodSeconds}' 2>/dev/null || echo "")
 echo "CREATED=$POD_CREATED" > "$OUT/pod_timing.txt"
 echo "STARTED=$POD_STARTED" >> "$OUT/pod_timing.txt"
 echo "UID=$POD_UID" >> "$OUT/pod_timing.txt"
+echo "TERMINATION_GRACE_PERIOD_SECONDS=$POD_TERMINATION_GRACE" >> "$OUT/pod_timing.txt"
 
 POD_IP=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.podIP}' 2>/dev/null || echo "")
 NODE=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.spec.nodeName}' 2>/dev/null || echo "")

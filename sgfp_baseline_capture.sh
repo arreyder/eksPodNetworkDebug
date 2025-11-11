@@ -5,6 +5,18 @@ set -euo pipefail
 # Captures current state of cluster metrics for comparison during incidents
 # Usage: ./sgfp_baseline_capture.sh [--label <label>]
 
+# Helper function to get kubectl context and sanitize for directory names
+get_kubectl_context() {
+  local context
+  if command -v kubectl >/dev/null 2>&1; then
+    context=$(kubectl config current-context 2>/dev/null || echo "unknown")
+  else
+    context="unknown"
+  fi
+  # Sanitize: replace special chars with dashes, remove leading/trailing dashes
+  echo "$context" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/^-\+//;s/-\+$//' | sed 's/-\+/-/g'
+}
+
 LABEL="${1:-}"
 if [ -n "$LABEL" ] && [ "$LABEL" != "--label" ]; then
   LABEL="$1"
@@ -12,14 +24,18 @@ elif [ "$1" = "--label" ] && [ -n "${2:-}" ]; then
   LABEL="$2"
 fi
 
+KUBECTL_CONTEXT=$(get_kubectl_context)
+DATA_DIR="data/${KUBECTL_CONTEXT}"
+mkdir -p "$DATA_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-OUT="sgfp_baseline_${LABEL:+${LABEL}_}${TIMESTAMP}"
+OUT="$DATA_DIR/sgfp_baseline_${LABEL:+${LABEL}_}${TIMESTAMP}"
 mkdir -p "$OUT"
 
 log()  { printf "[BASELINE] %s\n" "$*"; }
 warn() { printf "[BASELINE] WARN: %s\n" "$*" >&2; }
 
 log "Capturing baseline metrics snapshot"
+log "Cluster: ${KUBECTL_CONTEXT}"
 log "Output: $OUT"
 [ -n "$LABEL" ] && log "Label: $LABEL"
 
@@ -269,7 +285,7 @@ log "Use this baseline for comparison during incidents"
 
 # Export baseline directory for use by compare script
 export SGFP_BASELINE_DIR="$OUT"
-echo "$OUT" > .sgfp_baseline_latest 2>/dev/null || true
+echo "$OUT" > "$DATA_DIR/.sgfp_baseline_latest" 2>/dev/null || true
 log "Baseline directory exported: SGFP_BASELINE_DIR=$OUT"
 log "To use this baseline: export SGFP_BASELINE_DIR=\"$OUT\""
 

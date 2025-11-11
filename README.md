@@ -73,6 +73,35 @@ Each document explains what we check, why it matters, how we check it, and recom
 - `aws` CLI configured (and `AWS_REGION` set, e.g., `export AWS_REGION=us-west-2`)
 - Permissions: `ec2:DescribeNetworkInterfaces`, optionally CloudTrail `lookup-events`, optionally CloudWatch `GetMetricStatistics` (for NAT gateway SNAT port exhaustion detection)
 
+## Directory Structure
+
+All diagnostic data and reports are organized by **kubectl context** (cluster name) for easy identification:
+
+```
+data/
+  <cluster-context>/
+    sgfp_bundle_<cluster-context>_<pod-name>_YYYYMMDD_HHMMSS/
+      pod_<pod-name>/
+      node_<node-name>/
+      aws_<node-name>/
+      report.md
+    sgfp_diag_YYYYMMDD_HHMMSS/
+    sgfp_api_diag_YYYYMMDD_HHMMSS/
+    sgfp_baseline_<label>_YYYYMMDD_HHMMSS/
+    .sgfp_baseline_latest
+
+reports/
+  <cluster-context>/
+    sgfp_bundle_<cluster-context>_<pod-name>_YYYYMMDD_HHMMSS.md
+```
+
+**Benefits:**
+- **Cluster identification**: All data is tagged with the kubectl context, making it easy to identify which cluster the diagnostics belong to
+- **Organized structure**: Data files are in `data/`, reports are in `reports/`
+- **Context in output**: Console output and reports include the cluster context name
+
+The cluster context is automatically detected from `kubectl config current-context` and sanitized for use in directory names.
+
 ## Quick Start
 
 ### Option 1: All-in-One (Recommended)
@@ -81,6 +110,7 @@ Each document explains what we check, why it matters, how we check it, and recom
 export AWS_REGION=us-west-2
 
 # Run everything: collect, API diag, report, analyze, and display
+# Output will be organized by kubectl context
 ./sgfp_doctor.sh <pod-name> -n default --minutes 60
 ```
 
@@ -90,13 +120,17 @@ export AWS_REGION=us-west-2
 export AWS_REGION=us-west-2
 
 # 1) Collect a bundle for a pod (namespace default)
+# Output: data/<cluster-context>/sgfp_bundle_<cluster-context>_<pod-name>_YYYYMMDD_HHMMSS/
 ./sgfp_collect.sh -n default <pod-name>
 
 # 2) (Optional) CloudTrail ENI API diagnostics for last 60 minutes
+# Output: data/<cluster-context>/sgfp_api_diag_YYYYMMDD_HHMMSS/
 WINDOW_MINUTES=60 ./sgfp_api_diag.sh
 
 # 3) Generate a report for the bundle
-B=$(ls -dt sgfp_bundle_<pod-name>_* | head -1)
+# Output: data/<cluster-context>/sgfp_bundle_.../report.md
+#        reports/<cluster-context>/sgfp_bundle_..._YYYYMMDD_HHMMSS.md
+B=$(ls -dt data/*/sgfp_bundle_* 2>/dev/null | head -1)
 ./sgfp_report.sh "$B"
 
 # 4) Post analyze the bundle
@@ -121,10 +155,10 @@ make clean
 
 ## What gets collected
 
-Bundle structure (example):
+Bundle structure (example, organized by cluster context):
 
 ```
-sgfp_bundle_<pod>_<timestamp>/
+data/<cluster-context>/sgfp_bundle_<cluster-context>_<pod>_<timestamp>/
   pod_<pod>/
     pod_annotations.json
     pod_conditions.json
@@ -172,9 +206,10 @@ sgfp_bundle_<pod>_<timestamp>/
     node_sockstat.txt                      # Socket statistics
     node_sockstat6.txt                     # IPv6 socket statistics
     node_snmp.txt                          # Socket overruns
-    node_netns_count.txt                   # Network namespace count
     node_netns_list.txt                    # List of network namespaces
-    node_netns_details.json                # Network namespace details (interfaces, IPs, timing)
+    node_netns_details.json                # Network namespace details (interfaces, IPs, process count, timing)
+    node_pod_ip_map.txt                    # Map of active pod IPv4 addresses to namespace/name
+    node_pod_ipv6_map.txt                  # Map of active pod IPv6 addresses to namespace/name
     node_interfaces_state.txt              # All interface states
     node_all_ips.txt                       # All IP addresses on node
     node_duplicate_ips.txt                 # Duplicate IP addresses (if any)
@@ -309,7 +344,10 @@ Collects node-level diagnostics: conntrack usage, interface error statistics, so
 - Collects interface error statistics from `/proc/net/dev` and `ip -s link`
 - Collects socket statistics including overruns from `/proc/net/sockstat` and `/proc/net/snmp`
 - Creates error summaries for each CNI log file
-- Analyzes network namespaces for leaks (orphaned namespaces with no interfaces, only flags as issue if older than 1 hour)
+- **Enhanced orphaned namespace detection**: Uses IP-based matching to accurately identify truly orphaned network namespaces by:
+  - Collecting actual IP addresses (IPv4 and IPv6) from each network namespace
+  - Creating a map of all active pod IPs to `namespace/name` identifiers
+  - Matching namespace IPs against active pod IPs (only flags as orphaned if no matching pod found, no processes, and older than 1 hour)
 - Detects IP address conflicts (duplicate IPs on node)
 - Tests DNS resolution (Kubernetes DNS, metadata service)
 - Collects CoreDNS pod status and configuration
@@ -420,8 +458,7 @@ Advanced analysis for diagnosing pod connectivity issues, especially after large
 - Analyzes pod events for network-related issues
 - Analyzes CNI logs (both aws-node and node-level CNI logs)
 - Checks readiness gate timing
-- Detects stuck/orphaned network namespaces
-- Analyzes network namespace creation timing (delays after pod creation)
+- Detects truly orphaned network namespaces using IP-based matching (matches namespace IPs against active pod IPs)
 - Detects IP address conflicts
 - Tests DNS resolution
 - Checks for resource exhaustion (file descriptors, memory pressure)
@@ -687,10 +724,10 @@ make clean-debug-pods NS=<namespace>   # Clean up debug pods interactively
   - This helps diagnose if connectivity issues are local to the node or cross-node networking problems
 - **Log Files Summary**: The report includes a concise summary of all log files with error counts and file paths, making it easy to identify which logs need attention
 - **View Related Logs Helper**: The `sgfp_view_logs.sh` script automatically extracts pod identifiers and searches all log files for pod-related lines, with options to view only errors or all logs
-- **Network Namespace Matching**: Attempts to match pod's network namespace using container ID (with fallback to pod UID) to handle AWS CNI's hashed namespace naming scheme
-- **Leak Detection**: Only flags empty network namespaces as issues if they're older than 1 hour (to avoid false positives from transient cleanup states)
+- **Enhanced Orphaned Namespace Detection**: Uses IP-based matching to accurately identify truly orphaned network namespaces by collecting actual IP addresses from namespaces and matching them against active pod IPs (eliminates false positives from interface-count-only checks)
+- **Process Counting**: Counts processes within each network namespace for additional context when determining if a namespace is truly orphaned
 - **Node Debug Pod**: The `sgfp_node_debug.sh` script can accept either a pod name (will find the node) or a node name directly.
-- **Output Directories**: All diagnostic output directories (`sgfp_bundle_*`, `sgfp_diag_*`, `sgfp_api_diag_*`) are automatically ignored by git (see `.gitignore`).
+- **Output Directories**: All diagnostic output directories (`data/`, `reports/`, and legacy `sgfp_bundle_*`, `sgfp_diag_*`, `sgfp_api_diag_*`) are automatically ignored by git (see `.gitignore`).
 
 ## Requirements
 

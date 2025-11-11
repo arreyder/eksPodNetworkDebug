@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-NODE="${1:?usage: sgfp_node_diag.sh <node-name>}"
-OUT="sgfp_diag_$(date +%Y%m%d_%H%M%S)"
+NODE="${1:?usage: sgfp_node_diag.sh <node-name> [data-dir]}"
+DATA_DIR="${2:-data/unknown}"
+mkdir -p "$DATA_DIR"
+OUT="$DATA_DIR/sgfp_diag_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"
 
 log()  { printf "[NODE] %s\n" "$*"; }
@@ -427,6 +429,36 @@ if [ "$RP_FILTER_COLLECTED" -eq 0 ] && [ "${TEMP_POD_AVAILABLE:-0}" = "1" ] && [
   fi
 fi
 
+# Collect pod IP map for orphaned namespace detection (before namespace collection)
+log "Collecting pod IP map for namespace matching..."
+if command -v kubectl >/dev/null 2>&1; then
+  # Build map of podIP -> namespace/name (only active, non-terminating pods)
+  # Format: IP namespace/name phase
+  kubectl get pods -A -o json 2>/dev/null | jq -r '.items[] | 
+    select(.status.podIP != null and .status.podIP != "") | 
+    select(.status.phase != "Failed") | 
+    select(.metadata.deletionTimestamp == null) | 
+    "\(.status.podIP) \(.metadata.namespace)/\(.metadata.name) \(.status.phase)"' \
+    | sort > "$OUT/node_pod_ip_map.txt" 2>/dev/null || echo "" > "$OUT/node_pod_ip_map.txt"
+  
+  # Also collect IPv6 IPs if present
+  kubectl get pods -A -o json 2>/dev/null | jq -r '.items[] | 
+    select(.status.podIPs != null) | 
+    .status.podIPs[]? | 
+    select(.ip != null and .ip != "") | 
+    select(.ip | test(":")) |  # IPv6 addresses contain ":"
+    "\(.ip) \(.metadata.namespace)/\(.metadata.name)"' \
+    | sort > "$OUT/node_pod_ipv6_map.txt" 2>/dev/null || touch "$OUT/node_pod_ipv6_map.txt"
+  
+  POD_IP_MAP_COUNT=$(wc -l < "$OUT/node_pod_ip_map.txt" 2>/dev/null | tr -d '[:space:]' || echo "0")
+  POD_IPV6_MAP_COUNT=$(wc -l < "$OUT/node_pod_ipv6_map.txt" 2>/dev/null | tr -d '[:space:]' || echo "0")
+  log "Collected $POD_IP_MAP_COUNT IPv4 pod IP(s) and $POD_IPV6_MAP_COUNT IPv6 pod IP(s) for namespace matching"
+else
+  echo "" > "$OUT/node_pod_ip_map.txt"
+  touch "$OUT/node_pod_ipv6_map.txt"
+  warn "kubectl not available, cannot collect pod IP map"
+fi
+
 # Network namespace analysis (stuck/orphaned namespaces)
 log "Analyzing network namespaces for leaks..."
 # Try both direct access and via /host mount (for temporary debug pods)
@@ -438,6 +470,74 @@ for dir in $NETNS_DIRS; do
     break
   fi
 done
+
+# Helper function to get all IPs from a namespace (IPv4 and IPv6)
+get_namespace_ips() {
+  local ns_name="$1"
+  local via_pod="${2:-}"
+  local ns_file_path="${3:-}"
+  local ipv4_ips=""
+  local ipv6_ips=""
+  
+  if [ -n "$via_pod" ]; then
+    # Via temporary pod - use exact same commands as user's manual check
+    # Enter host namespace with nsenter --target 1, then use ip -n to access network namespace
+    # Tools are already in the pod and in PATH, no need to find them
+    
+    # Method 1: Enter host namespace, then use ip -n (exact match to user's manual check)
+    ipv4_ips=$(kubectl exec "$via_pod" -- sh -c "nsenter --target 1 --mount --uts --ipc --net --pid ip -n \"$ns_name\" -o -4 addr show dev eth0 2>/dev/null | awk '{print \$4}' | cut -d/ -f1 | tr '\n' ' ' || echo ''" 2>/dev/null | tr -d '[:space:]' || echo "")
+    ipv6_ips=$(kubectl exec "$via_pod" -- sh -c "nsenter --target 1 --mount --uts --ipc --net --pid ip -n \"$ns_name\" -o -6 addr show dev eth0 2>/dev/null | awk '{print \$4}' | cut -d/ -f1 | tr '\n' ' ' || echo ''" 2>/dev/null | tr -d '[:space:]' || echo "")
+    
+    # Method 2: If no IPs found with eth0, try all interfaces
+    if [ -z "$ipv4_ips" ] && [ -z "$ipv6_ips" ]; then
+      ipv4_ips=$(kubectl exec "$via_pod" -- sh -c "nsenter --target 1 --mount --uts --ipc --net --pid ip -n \"$ns_name\" -o -4 addr show 2>/dev/null | awk '{print \$4}' | cut -d/ -f1 | tr '\n' ' ' || echo ''" 2>/dev/null | tr -d '[:space:]' || echo "")
+      ipv6_ips=$(kubectl exec "$via_pod" -- sh -c "nsenter --target 1 --mount --uts --ipc --net --pid ip -n \"$ns_name\" -o -6 addr show 2>/dev/null | awk '{print \$4}' | cut -d/ -f1 | tr '\n' ' ' || echo ''" 2>/dev/null | tr -d '[:space:]' || echo "")
+    fi
+  else
+    # Direct access - use ip netns exec (more reliable)
+    ipv4_ips=$(ip netns exec "$ns_name" ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' ' || echo "")
+    ipv6_ips=$(ip netns exec "$ns_name" ip -o -6 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' ' || echo "")
+  fi
+  
+  # Return as JSON array
+  local ipv4_json="[]"
+  local ipv6_json="[]"
+  if [ -n "$ipv4_ips" ]; then
+    ipv4_json=$(echo "$ipv4_ips" | tr ' ' '\n' | grep -v '^$' | jq -R . | jq -s . 2>/dev/null || echo "[]")
+  fi
+  if [ -n "$ipv6_ips" ]; then
+    ipv6_json=$(echo "$ipv6_ips" | tr ' ' '\n' | grep -v '^$' | jq -R . | jq -s . 2>/dev/null || echo "[]")
+  fi
+  
+  echo "{\"ipv4\": $ipv4_json, \"ipv6\": $ipv6_json}"
+}
+
+# Helper function to get process count in namespace
+get_namespace_process_count() {
+  local ns_name="$1"
+  local via_pod="${2:-}"
+  local proc_count="0"
+  
+  if [ -n "$via_pod" ]; then
+    # Via temporary pod - use ip netns pids (most reliable method)
+    # This lists PIDs that are actually in the network namespace
+    proc_count=$(kubectl exec "$via_pod" -- sh -c "ip netns pids \"$ns_name\" 2>/dev/null | wc -l || echo 0" 2>/dev/null | tr -d '[:space:]' || echo "0")
+    
+    # If ip netns pids doesn't work, try alternative: check if namespace is accessible
+    # If namespace has no interfaces and ip netns pids fails, it's likely truly empty
+    if [ "$proc_count" = "0" ] || [ -z "$proc_count" ]; then
+      # Try to verify namespace is accessible - if not, process count is 0
+      if ! kubectl exec "$via_pod" -- sh -c "ip netns exec \"$ns_name\" true 2>/dev/null" >/dev/null 2>&1; then
+        proc_count="0"
+      fi
+    fi
+  else
+    # Direct access - use ip netns pids (lists PIDs in the network namespace)
+    proc_count=$(ip netns pids "$ns_name" 2>/dev/null | wc -l | tr -d '[:space:]' || echo "0")
+  fi
+  
+  echo "$proc_count"
+}
 
 # If we have a temporary pod available, use it for network namespace and conntrack collection
 if [ "${TEMP_POD_AVAILABLE:-0}" = "1" ] && [ -n "${TEMP_POD_NAME:-}" ] && command -v kubectl >/dev/null 2>&1; then
@@ -472,6 +572,13 @@ if [ "${TEMP_POD_AVAILABLE:-0}" = "1" ] && [ -n "${TEMP_POD_NAME:-}" ] && comman
   # Get details for each namespace
   while IFS= read -r NS_NAME; do
     [ -z "$NS_NAME" ] && continue
+    
+    # Check if namespace is actually active (not just a stale file)
+    NS_ACTIVE=0
+    if kubectl exec "$TEMP_POD_NAME" -- sh -c "ip netns exec \"$NS_NAME\" true 2>/dev/null" >/dev/null 2>&1; then
+      NS_ACTIVE=1
+    fi
+    
     # Try multiple methods to get interface count (some namespaces may not be accessible via ip netns exec)
     # Method 1: Try ip netns exec (works for active namespaces)
     NS_INTERFACES=$(kubectl exec "$TEMP_POD_NAME" -- sh -c "ip netns exec \"$NS_NAME\" ip link show 2>/dev/null | grep -E '^[0-9]+:' | wc -l || echo 0" 2>/dev/null | tr -d '[:space:]' || echo "0")
@@ -487,9 +594,66 @@ if [ "${TEMP_POD_AVAILABLE:-0}" = "1" ] && [ -n "${TEMP_POD_NAME:-}" ] && comman
       NS_INTERFACES=$(kubectl exec "$TEMP_POD_NAME" -- sh -c "nsenter --net=/host/var/run/netns/$NS_NAME ip link show 2>/dev/null | grep -E '^[0-9]+:' | wc -l || nsenter --net=/var/run/netns/$NS_NAME ip link show 2>/dev/null | grep -E '^[0-9]+:' | wc -l || echo 0" 2>/dev/null | tr -d '[:space:]' || echo "0")
     fi
     
+    # Get actual IP addresses (IPv4 and IPv6)
+    # Try with full namespace file path first (more reliable from temporary pod)
+    # Check which path exists
+    NS_FILE_PATH=""
+    if kubectl exec "$TEMP_POD_NAME" -- sh -c "test -e /host/var/run/netns/$NS_NAME" >/dev/null 2>&1; then
+      NS_FILE_PATH="/host/var/run/netns/$NS_NAME"
+    elif kubectl exec "$TEMP_POD_NAME" -- sh -c "test -e /var/run/netns/$NS_NAME" >/dev/null 2>&1; then
+      NS_FILE_PATH="/var/run/netns/$NS_NAME"
+    fi
+    
+    # Also try using ip -n directly (like user's manual check) - this might work better
+    # The user's manual check used: ip -n "$ns" -o -4 addr show dev eth0
+    # Try this method first since it worked for the user
+    NS_IPS_JSON_TMP=$(mktemp)
+    if [ -n "$NS_FILE_PATH" ]; then
+      # Try ip -n with nsenter to the namespace (simulating what user did)
+      # First try all interfaces
+      NS_IPV4_TMP=$(kubectl exec "$TEMP_POD_NAME" -- sh -c "nsenter --net=$NS_FILE_PATH ip -o -4 addr show 2>/dev/null | awk '{print \$4}' | cut -d/ -f1 | tr '\n' ' ' || echo ''" 2>/dev/null | tr -d '[:space:]' || echo "")
+      NS_IPV6_TMP=$(kubectl exec "$TEMP_POD_NAME" -- sh -c "nsenter --net=$NS_FILE_PATH ip -o -6 addr show 2>/dev/null | awk '{print \$4}' | cut -d/ -f1 | tr '\n' ' ' || echo ''" 2>/dev/null | tr -d '[:space:]' || echo "")
+      
+      # If no IPs, try eth0 specifically (matches user's manual check exactly)
+      if [ -z "$NS_IPV4_TMP" ] && [ -z "$NS_IPV6_TMP" ]; then
+        NS_IPV4_TMP=$(kubectl exec "$TEMP_POD_NAME" -- sh -c "nsenter --net=$NS_FILE_PATH ip -o -4 addr show dev eth0 2>/dev/null | awk '{print \$4}' | cut -d/ -f1 | tr '\n' ' ' || echo ''" 2>/dev/null | tr -d '[:space:]' || echo "")
+        NS_IPV6_TMP=$(kubectl exec "$TEMP_POD_NAME" -- sh -c "nsenter --net=$NS_FILE_PATH ip -o -6 addr show dev eth0 2>/dev/null | awk '{print \$4}' | cut -d/ -f1 | tr '\n' ' ' || echo ''" 2>/dev/null | tr -d '[:space:]' || echo "")
+      fi
+      
+      # Convert to JSON
+      if [ -n "$NS_IPV4_TMP" ] || [ -n "$NS_IPV6_TMP" ]; then
+        NS_IPV4_JSON="[]"
+        NS_IPV6_JSON="[]"
+        if [ -n "$NS_IPV4_TMP" ]; then
+          NS_IPV4_JSON=$(echo "$NS_IPV4_TMP" | tr ' ' '\n' | grep -v '^$' | jq -R . | jq -s . 2>/dev/null || echo "[]")
+        fi
+        if [ -n "$NS_IPV6_TMP" ]; then
+          NS_IPV6_JSON=$(echo "$NS_IPV6_TMP" | tr ' ' '\n' | grep -v '^$' | jq -R . | jq -s . 2>/dev/null || echo "[]")
+        fi
+        echo "{\"ipv4\": $NS_IPV4_JSON, \"ipv6\": $NS_IPV6_JSON}" > "$NS_IPS_JSON_TMP"
+      else
+        # Fall back to the helper function
+        get_namespace_ips "$NS_NAME" "$TEMP_POD_NAME" "$NS_FILE_PATH" > "$NS_IPS_JSON_TMP"
+      fi
+    else
+      # No namespace file path found, use helper function
+      get_namespace_ips "$NS_NAME" "$TEMP_POD_NAME" "" > "$NS_IPS_JSON_TMP"
+    fi
+    NS_IPS_JSON=$(cat "$NS_IPS_JSON_TMP" 2>/dev/null || echo "{\"ipv4\": [], \"ipv6\": []}")
+    rm -f "$NS_IPS_JSON_TMP" 2>/dev/null || true
+    
+    # Get process count in namespace
+    NS_PROC_COUNT=$(get_namespace_process_count "$NS_NAME" "$TEMP_POD_NAME")
+    
     # Add to JSON
-    jq --arg name "$NS_NAME" --arg interfaces "$NS_INTERFACES" --arg ips "$NS_IPS" --arg mtime "$NS_MTIME" \
-      '. += [{"name": $name, "interface_count": ($interfaces | tonumber), "ip_count": ($ips | tonumber), "mtime": ($mtime | tonumber)}]' \
+    jq --arg name "$NS_NAME" \
+       --arg interfaces "$NS_INTERFACES" \
+       --arg ips "$NS_IPS" \
+       --arg mtime "$NS_MTIME" \
+       --arg active "$NS_ACTIVE" \
+       --arg proc_count "$NS_PROC_COUNT" \
+       --argjson ips_json "$NS_IPS_JSON" \
+      '. += [{"name": $name, "interface_count": ($interfaces | tonumber), "ip_count": ($ips | tonumber), "mtime": ($mtime | tonumber), "active": ($active | tonumber), "process_count": ($proc_count | tonumber), "ips": $ips_json}]' \
       "$NETNS_JSON_TMP" > "${NETNS_JSON_TMP}.new" && mv "${NETNS_JSON_TMP}.new" "$NETNS_JSON_TMP"
   done < "$OUT/node_netns_list.txt"
   
@@ -507,6 +671,13 @@ elif [ -n "$NETNS_DIR" ] && command -v ip >/dev/null 2>&1; then
   for ns in "$NETNS_DIR"/*; do
     [ ! -e "$ns" ] && continue
     NS_NAME=$(basename "$ns")
+    
+    # Check if namespace is actually active
+    NS_ACTIVE=0
+    if ip netns exec "$NS_NAME" true 2>/dev/null; then
+      NS_ACTIVE=1
+    fi
+    
     # Get interfaces in this namespace
     NS_INTERFACES=$(ip netns exec "$NS_NAME" ip link show 2>/dev/null | grep -E "^[0-9]+:" | wc -l | tr -d '[:space:]' || echo "0")
     # Get IPs in this namespace
@@ -514,9 +685,22 @@ elif [ -n "$NETNS_DIR" ] && command -v ip >/dev/null 2>&1; then
     # Get namespace file modification time (approximate creation time)
     NS_MTIME=$(stat -c %Y "$ns" 2>/dev/null || echo "0")
     
+    # Get actual IP addresses (IPv4 and IPv6)
+    # For direct access, namespace file path is not needed
+    NS_IPS_JSON=$(get_namespace_ips "$NS_NAME" "" "")
+    
+    # Get process count in namespace
+    NS_PROC_COUNT=$(get_namespace_process_count "$NS_NAME" "")
+    
     # Add to JSON
-    jq --arg name "$NS_NAME" --arg interfaces "$NS_INTERFACES" --arg ips "$NS_IPS" --arg mtime "$NS_MTIME" \
-      '. += [{"name": $name, "interface_count": ($interfaces | tonumber), "ip_count": ($ips | tonumber), "mtime": ($mtime | tonumber)}]' \
+    jq --arg name "$NS_NAME" \
+       --arg interfaces "$NS_INTERFACES" \
+       --arg ips "$NS_IPS" \
+       --arg mtime "$NS_MTIME" \
+       --arg active "$NS_ACTIVE" \
+       --arg proc_count "$NS_PROC_COUNT" \
+       --argjson ips_json "$NS_IPS_JSON" \
+      '. += [{"name": $name, "interface_count": ($interfaces | tonumber), "ip_count": ($ips | tonumber), "mtime": ($mtime | tonumber), "active": ($active | tonumber), "process_count": ($proc_count | tonumber), "ips": $ips_json}]' \
       "$NETNS_JSON_TMP" > "${NETNS_JSON_TMP}.new" && mv "${NETNS_JSON_TMP}.new" "$NETNS_JSON_TMP"
   done
   
@@ -628,6 +812,10 @@ if command -v kubectl >/dev/null 2>&1; then
   # DNS ConfigMap (CoreDNS config)
   kubectl get configmap -n kube-system coredns -o json > "$OUT/node_coredns_config.json" 2>/dev/null || echo '{}' > "$OUT/node_coredns_config.json"
   
+  # AWS VPC CNI ConfigMap (contains CNI configuration settings like branch-eni-cooldown)
+  # Note: ConfigMap name is 'amazon-vpc-cni' (not 'aws-vpc-cni')
+  kubectl get configmap -n kube-system amazon-vpc-cni -o json > "$OUT/node_aws_vpc_cni_config.json" 2>/dev/null || echo '{}' > "$OUT/node_aws_vpc_cni_config.json"
+  
   log "Collected DNS service and CoreDNS/NodeLocal DNSCache information"
 fi
 
@@ -691,8 +879,14 @@ if command -v kubectl >/dev/null 2>&1; then
     echo "" > "$OUT/node_container_runtime_version.txt"
   fi
   
-  # aws-node DaemonSet version (from image tag)
+  # aws-node DaemonSet version (from image tag) and environment variables
   kubectl get daemonset -n kube-system aws-node -o json > "$OUT/node_aws_node_daemonset.json" 2>/dev/null || echo '{}' > "$OUT/node_aws_node_daemonset.json"
+  # Extract environment variables from aws-node daemonset (for settings like branch-eni-cooldown)
+  if [ -s "$OUT/node_aws_node_daemonset.json" ]; then
+    jq -r '.spec.template.spec.containers[0].env // []' "$OUT/node_aws_node_daemonset.json" > "$OUT/node_aws_node_env.json" 2>/dev/null || echo '[]' > "$OUT/node_aws_node_env.json"
+  else
+    echo '[]' > "$OUT/node_aws_node_env.json"
+  fi
   AWS_NODE_IMAGE=$(jq -r '.spec.template.spec.containers[0].image // ""' "$OUT/node_aws_node_daemonset.json" 2>/dev/null || echo "")
   if [ -n "$AWS_NODE_IMAGE" ] && [ "$AWS_NODE_IMAGE" != "null" ] && [ "$AWS_NODE_IMAGE" != "" ]; then
     echo "$AWS_NODE_IMAGE" > "$OUT/node_aws_node_image.txt"

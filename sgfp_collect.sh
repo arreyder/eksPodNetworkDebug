@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Helper function to get kubectl context and sanitize for directory names
+get_kubectl_context() {
+  local context
+  if command -v kubectl >/dev/null 2>&1; then
+    context=$(kubectl config current-context 2>/dev/null || echo "unknown")
+  else
+    context="unknown"
+  fi
+  # Sanitize: replace special chars with dashes, remove leading/trailing dashes
+  echo "$context" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/^-\+//;s/-\+$//' | sed 's/-\+/-/g'
+}
+
+# Get context and create directory structure
+KUBECTL_CONTEXT=$(get_kubectl_context)
+DATA_DIR="data/${KUBECTL_CONTEXT}"
+REPORTS_DIR="reports/${KUBECTL_CONTEXT}"
+mkdir -p "$DATA_DIR" "$REPORTS_DIR"
+
 NS="default"
 while getopts ":n:" opt; do
   case $opt in
@@ -12,8 +30,8 @@ shift $((OPTIND-1))
 POD="${1:?usage: sgfp_collect.sh [-n namespace] <pod-name>}"
 
 # 1) Pod diag
-./sgfp_pod_diag.sh "$POD" "$NS"
-LATEST=$(ls -dt sgfp_diag_* 2>/dev/null | head -n1 || true)
+./sgfp_pod_diag.sh "$POD" "$NS" "$DATA_DIR"
+LATEST=$(ls -dt "$DATA_DIR"/sgfp_diag_* 2>/dev/null | head -n1 || true)
 if [ -z "$LATEST" ] || [ ! -d "$LATEST" ]; then
   echo "ERROR: Failed to find pod diagnostic output directory" >&2
   exit 1
@@ -183,10 +201,10 @@ fi
 
 # 3) Node + AWS diags
 # Get list of existing diag dirs before running node diag
-EXISTING_DIRS=$(ls -d sgfp_diag_* 2>/dev/null || true)
-./sgfp_node_diag.sh "$NODE"
+EXISTING_DIRS=$(ls -d "$DATA_DIR"/sgfp_diag_* 2>/dev/null || true)
+./sgfp_node_diag.sh "$NODE" "$DATA_DIR"
 # Find the newest directory that wasn't there before
-NODE_OUT=$(ls -dt sgfp_diag_* 2>/dev/null | while read dir; do
+NODE_OUT=$(ls -dt "$DATA_DIR"/sgfp_diag_* 2>/dev/null | while read dir; do
   if [ -n "$EXISTING_DIRS" ]; then
     echo "$EXISTING_DIRS" | grep -q "^${dir}$" && continue
   fi
@@ -199,10 +217,10 @@ if [ -z "$NODE_OUT" ] || [ ! -d "$NODE_OUT" ]; then
 fi
 
 # Get list of existing diag dirs before running AWS diag
-EXISTING_DIRS=$(ls -d sgfp_diag_* 2>/dev/null || true)
-./sgfp_aws_diag.sh "$NODE"
+EXISTING_DIRS=$(ls -d "$DATA_DIR"/sgfp_diag_* 2>/dev/null || true)
+./sgfp_aws_diag.sh "$NODE" "$DATA_DIR"
 # Find the newest directory that wasn't there before
-AWS_OUT=$(ls -dt sgfp_diag_* 2>/dev/null | while read dir; do
+AWS_OUT=$(ls -dt "$DATA_DIR"/sgfp_diag_* 2>/dev/null | while read dir; do
   if [ -n "$EXISTING_DIRS" ]; then
     echo "$EXISTING_DIRS" | grep -q "^${dir}$" && continue
   fi
@@ -215,7 +233,7 @@ if [ -z "$AWS_OUT" ] || [ ! -d "$AWS_OUT" ]; then
 fi
 
 # 4) Consolidate
-MASTER="sgfp_bundle_${POD}_$(date +%Y%m%d_%H%M%S)"
+MASTER="$DATA_DIR/sgfp_bundle_${KUBECTL_CONTEXT}_${POD}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$MASTER"
 mv "$LATEST" "$MASTER/pod_${POD}"
 
@@ -249,6 +267,7 @@ else
 fi
 
 echo
+echo "[COLLECT] Cluster: ${KUBECTL_CONTEXT}"
 echo "[COLLECT] All diagnostics in: $MASTER"
 echo "[COLLECT]   - $MASTER/pod_${POD}"
 [ -d "$MASTER/node_${NODE}" ] && echo "[COLLECT]   - $MASTER/node_${NODE}"

@@ -6,10 +6,12 @@ The toolkit detects orphaned or leaked network namespaces that remain after pods
 
 **Checks performed:**
 - Counts total network namespaces on node
-- Identifies namespaces with no interfaces (orphaned)
-- Checks namespace age (only flags as issue if older than 1 hour)
-- Attempts to match pod's network namespace using container ID or pod UID
-- Reports potential leaks with namespace age
+- **Enhanced IP-based matching**: Collects actual IP addresses (IPv4 and IPv6) from each network namespace
+- **Pod IP mapping**: Creates a map of all active pod IPs to `namespace/name` identifiers
+- **Accurate matching**: Matches network namespace IPs against active pod IPs to identify truly orphaned namespaces
+- **Process counting**: Counts processes within each namespace for additional context
+- **Age-based filtering**: Only flags namespaces as orphaned if they're older than 1 hour (avoids false positives)
+- Reports potential leaks with namespace IPs, age, and process count
 
 ## Why It Matters
 
@@ -28,20 +30,25 @@ The toolkit detects orphaned or leaked network namespaces that remain after pods
 
 ## How We Check It
 
-1. **Namespace Collection**: Lists all namespaces in `/var/run/netns`
-2. **Interface Check**: For each namespace, checks if it has any network interfaces
-3. **Age Calculation**: Calculates namespace age from creation time
-4. **Leak Detection**: Flags namespaces as leaks if:
-   - No interfaces present (empty namespace)
+1. **Namespace Collection**: Lists all namespaces in `/var/run/netns` (or `/host/var/run/netns` when accessed via temporary pod)
+2. **IP Address Collection**: For each namespace, collects actual IPv4 and IPv6 addresses using `nsenter` to enter the host namespace, then `ip -n` to access the network namespace
+3. **Pod IP Mapping**: Creates a map of all active pod IPs (excluding `Failed` and `Terminating` pods) to `namespace/name` format
+4. **Process Counting**: Counts processes within each namespace using `ip netns pids`
+5. **Age Calculation**: Calculates namespace age from file modification time
+6. **IP-based Matching**: Matches each namespace's IP addresses against the pod IP map:
+   - If namespace IP matches an active pod → namespace is active (not orphaned)
+   - If namespace has no IPs AND no processes AND is older than 1 hour → likely orphaned
+   - If namespace has IPs but no matching pod AND no processes AND is older than 1 hour → likely orphaned
+7. **Leak Detection**: Flags namespaces as truly orphaned only if:
+   - No matching pod found (IP doesn't match any active pod)
+   - No processes running in the namespace
    - Older than 1 hour (avoids false positives from transient cleanup)
-5. **Pod Matching**: Attempts to match pod's namespace using:
-   - Container ID (hashed format)
-   - Pod UID
 
 **Output examples:**
 - `[INFO] Found 13 network namespace(s) on node`
-- `[ISSUE] Found 13 network namespace(s) with no interfaces and older than 1 hour (likely leaks)`
-- `[WARN] Pod network namespace not found (pod may not have network setup yet or namespace name doesn't match UID)`
+- `[OK] cni-04b1c5aa-c3dc-db34-9c4f-3c27796f4201 -> default/be-innkeeper-7c49cfcb97-lsv45 (processes: 0)`
+- `[INFO] Namespace matching summary: Matched to pods: 13, Orphaned (safe to delete): 0`
+- `[ISSUE] Found 2 orphaned network namespace(s) (no matching pod, safe to delete after verification)`
 
 ## Recommended Actions
 
@@ -80,16 +87,21 @@ The toolkit detects orphaned or leaked network namespaces that remain after pods
    - Check if specific pod types cause leaks
    - Look for patterns (specific namespaces, timing)
 
-### If Pod Namespace Not Found
+### If Namespaces Show as Orphaned But Should Be Active
 
-1. **Verify pod is running**:
+1. **Verify pod is actually running**:
    ```bash
    kubectl get pod <pod-name> -n <namespace> -o wide
    ```
 
-2. **Check if namespace uses hashed naming**:
-   - AWS VPC CNI may use hashed namespace names
-   - Container ID may not match namespace name exactly
+2. **Check if pod IP matches namespace IP**:
+   ```bash
+   # Get pod IP
+   kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.status.podIP}'
+   
+   # Check namespace IP (from node)
+   ip netns exec <namespace-name> ip addr show dev eth0
+   ```
 
 3. **Verify network setup completed**:
    - Check pod events for network setup errors
@@ -117,9 +129,16 @@ The toolkit detects orphaned or leaked network namespaces that remain after pods
 
 ## Related Files
 
-- `node_netns_count.txt` - Total network namespace count
 - `node_netns_list.txt` - List of network namespace names
-- `node_netns_details.json` - Network namespace details (interfaces, IPs, timing)
+- `node_netns_details.json` - Network namespace details including:
+  - Namespace name
+  - Interface count
+  - IP addresses (IPv4 and IPv6 arrays)
+  - Process count
+  - Modification time (age)
+  - Active status
+- `node_pod_ip_map.txt` - Map of active pod IPv4 addresses to `namespace/name` format
+- `node_pod_ipv6_map.txt` - Map of active pod IPv6 addresses to `namespace/name` format
 
 ## References
 

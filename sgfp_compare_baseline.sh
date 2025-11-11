@@ -17,17 +17,37 @@ elif [ -n "${SGFP_BASELINE_DIR:-}" ] && [ -d "$SGFP_BASELINE_DIR" ]; then
 elif [ -f .sgfp_baseline_latest ]; then
   BASELINE_DIR=$(cat .sgfp_baseline_latest 2>/dev/null | tr -d '[:space:]' || echo "")
   if [ -z "$BASELINE_DIR" ] || [ ! -d "$BASELINE_DIR" ]; then
-    echo "Error: Saved baseline directory not found or invalid: $BASELINE_DIR" >&2
-    echo "Usage: ./sgfp_compare_baseline.sh [<baseline-dir>] <incident-bundle-dir>" >&2
-    echo "   Or: export SGFP_BASELINE_DIR=<baseline-dir>" >&2
-    exit 1
+    # Try to find in data directory if incident dir is provided
+    if [ -n "${1:-}" ] && echo "$1" | grep -q "^data/"; then
+      DATA_DIR=$(dirname "$(dirname "$1")")
+      if [ -f "$DATA_DIR/.sgfp_baseline_latest" ]; then
+        BASELINE_DIR=$(cat "$DATA_DIR/.sgfp_baseline_latest" 2>/dev/null | tr -d '[:space:]' || echo "")
+      fi
+    fi
+    if [ -z "$BASELINE_DIR" ] || [ ! -d "$BASELINE_DIR" ]; then
+      echo "Error: Saved baseline directory not found or invalid: $BASELINE_DIR" >&2
+      echo "Usage: ./sgfp_compare_baseline.sh [<baseline-dir>] <incident-bundle-dir>" >&2
+      echo "   Or: export SGFP_BASELINE_DIR=<baseline-dir>" >&2
+      exit 1
+    fi
   fi
   INCIDENT_DIR="${1:?usage: sgfp_compare_baseline.sh [<baseline-dir>] <incident-bundle-dir>}"
 else
-  echo "Error: Baseline directory not specified and not found in:" >&2
-  echo "  - Command argument (provide 2 arguments: <baseline-dir> <incident-dir>)" >&2
-  echo "  - SGFP_BASELINE_DIR environment variable" >&2
-  echo "  - .sgfp_baseline_latest file" >&2
+  # Try to find .sgfp_baseline_latest in data directory if incident dir is provided
+  if [ -n "${1:-}" ] && echo "$1" | grep -q "^data/"; then
+    DATA_DIR=$(dirname "$(dirname "$1")")
+    if [ -f "$DATA_DIR/.sgfp_baseline_latest" ]; then
+      BASELINE_DIR=$(cat "$DATA_DIR/.sgfp_baseline_latest" 2>/dev/null | tr -d '[:space:]' || echo "")
+      if [ -n "$BASELINE_DIR" ] && [ -d "$BASELINE_DIR" ]; then
+        INCIDENT_DIR="${1:?usage: sgfp_compare_baseline.sh [<baseline-dir>] <incident-bundle-dir>}"
+      fi
+    fi
+  fi
+  if [ -z "${BASELINE_DIR:-}" ] || [ ! -d "${BASELINE_DIR:-}" ]; then
+    echo "Error: Baseline directory not specified and not found in:" >&2
+    echo "  - Command argument (provide 2 arguments: <baseline-dir> <incident-dir>)" >&2
+    echo "  - SGFP_BASELINE_DIR environment variable" >&2
+    echo "  - .sgfp_baseline_latest file (root or in data/<context>/)" >&2
   echo "" >&2
   echo "Usage: ./sgfp_compare_baseline.sh [<baseline-dir>] <incident-bundle-dir>" >&2
   echo "   Or: export SGFP_BASELINE_DIR=<baseline-dir>" >&2

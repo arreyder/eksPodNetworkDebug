@@ -1,9 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Helper function to get kubectl context and sanitize for directory names
+get_kubectl_context() {
+  local context
+  if command -v kubectl >/dev/null 2>&1; then
+    context=$(kubectl config current-context 2>/dev/null || echo "unknown")
+  else
+    context="unknown"
+  fi
+  # Sanitize: replace special chars with dashes, remove leading/trailing dashes
+  echo "$context" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/^-\+//;s/-\+$//' | sed 's/-\+/-/g'
+}
+
 WINDOW_MINUTES="${WINDOW_MINUTES:-2880}"   # default 2 days
 
-OUT="sgfp_api_diag_$(date +%Y%m%d_%H%M%S)"
+KUBECTL_CONTEXT=$(get_kubectl_context)
+DATA_DIR="data/${KUBECTL_CONTEXT}"
+mkdir -p "$DATA_DIR"
+OUT="$DATA_DIR/sgfp_api_diag_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"
 
 log()  { printf "[API] %s\n" "$*"; }

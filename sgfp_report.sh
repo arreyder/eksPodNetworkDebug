@@ -2,7 +2,8 @@
 set -euo pipefail
 
 BUNDLE="${1:-}"
-if [ -z "$BUNDLE" ]; then echo "Usage: $0 <sgfp_bundle_dir>"; exit 1; fi
+REPORTS_DIR="${2:-}"
+if [ -z "$BUNDLE" ]; then echo "Usage: $0 <sgfp_bundle_dir> [reports-dir]"; exit 1; fi
 if [ ! -d "$BUNDLE" ]; then
   echo "ERROR: Bundle directory does not exist: $BUNDLE" >&2
   exit 1
@@ -18,9 +19,18 @@ if [ -z "$POD_DIR" ] || [ ! -d "$POD_DIR" ]; then
   exit 1
 fi
 
-# Extract pod name: bundle format is sgfp_bundle_<pod-name>_YYYYMMDD_HHMMSS
+# Extract cluster context from bundle path (data/<context>/sgfp_bundle_...)
+# Extract pod name: bundle format is sgfp_bundle_<context>_<pod-name>_YYYYMMDD_HHMMSS
+# Try to extract context from path first
+KUBECTL_CONTEXT="unknown"
+if echo "$BUNDLE" | grep -q "^data/"; then
+  KUBECTL_CONTEXT=$(echo "$BUNDLE" | sed 's|^data/\([^/]*\)/.*|\1|')
+fi
+# Extract pod name: bundle format is sgfp_bundle_<context>_<pod-name>_YYYYMMDD_HHMMSS
 # Match timestamp pattern (8 digits, underscore, 6 digits) at the end
-POD=$(basename "$BUNDLE" | sed 's/^sgfp_bundle_\(.*\)_[0-9]\{8\}_[0-9]\{6\}$/\1/')
+BUNDLE_BASENAME=$(basename "$BUNDLE")
+# Remove context prefix, then extract pod name
+POD=$(echo "$BUNDLE_BASENAME" | sed "s/^sgfp_bundle_${KUBECTL_CONTEXT}_//" | sed 's/_[0-9]\{8\}_[0-9]\{6\}$//')
 NODE="$(basename "${NODE_DIR:-}" | sed 's/^node_//')"
 
 POD_ANNO="$POD_DIR/pod_annotations.json"
@@ -54,12 +64,25 @@ BR_JSON="${AWS_DIR:+$AWS_DIR/_all_branch_enis_in_vpc.json}"
 say(){ echo "- $1" >> "$REPORT"; }
 
 echo "# SGFP Network Diagnostics Report" > "$REPORT"
+echo "Cluster: \`${KUBECTL_CONTEXT}\`" >> "$REPORT"
 echo "Pod: \`$POD\`" >> "$REPORT"
 [ -n "$NODE" ] && echo "Node: \`$NODE\`" >> "$REPORT"
 echo "Generated: \`$(date)\`" >> "$REPORT"
 echo >> "$REPORT"
 
 echo "## Pod Networking" >> "$REPORT"
+
+# Show termination grace period (relevant for network cleanup timing)
+if [ -s "$POD_TIMING" ]; then
+  TERMINATION_GRACE=$(grep "^TERMINATION_GRACE_PERIOD_SECONDS=" "$POD_TIMING" 2>/dev/null | cut -d= -f2- || echo "")
+  if [ -n "$TERMINATION_GRACE" ] && [ "$TERMINATION_GRACE" != "" ]; then
+    # Default is 30 seconds if not set
+    if [ "$TERMINATION_GRACE" = "null" ] || [ -z "$TERMINATION_GRACE" ]; then
+      TERMINATION_GRACE="30 (default)"
+    fi
+    say "[INFO] Termination grace period: ${TERMINATION_GRACE}s"
+  fi
+fi
 
 if [ -s "$POD_ANNO" ] && jq -er '."vpc.amazonaws.com/pod-eni"' "$POD_ANNO" >/dev/null 2>&1; then
   say "[OK] Pod ENI assigned (SG-for-Pods)"
@@ -931,33 +954,89 @@ if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_netns_details.json" ]; then
   if jq -e 'length > 0' "$NODE_DIR/node_netns_details.json" >/dev/null 2>&1; then
     echo >> "$REPORT"
     NETNS_COUNT=$(jq -r 'length' "$NODE_DIR/node_netns_details.json" 2>/dev/null || echo "0")
-    EMPTY_NS=$(jq -r '[.[] | select(.interface_count == 0)] | length' "$NODE_DIR/node_netns_details.json" 2>/dev/null || echo "0")
     say "[INFO] Network namespaces: $NETNS_COUNT total"
     
-    if [ "$EMPTY_NS" != "0" ]; then
-      # Check for old empty namespaces (older than 1 hour - likely leaks)
+    # Enhanced orphaned namespace detection using IP-based matching
+    if [ -s "$NODE_DIR/node_pod_ip_map.txt" ] || [ -s "$NODE_DIR/node_pod_ipv6_map.txt" ]; then
+      echo >> "$REPORT"
+      say "[INFO] Enhanced orphaned namespace detection (IP-based matching):"
+      
       CURRENT_TIME=$(date +%s 2>/dev/null || echo "0")
-      if [ "$CURRENT_TIME" != "0" ]; then
-        OLD_EMPTY_NS=$(jq -r --arg now "$CURRENT_TIME" '[.[] | select(.interface_count == 0 and (($now | tonumber) - .mtime) > 3600)] | length' "$NODE_DIR/node_netns_details.json" 2>/dev/null || echo "0")
+      MATCHED_COUNT=0
+      ORPHANED_COUNT=0
+      ORPHANED_LIST=""
+      
+      # Process each namespace and match against pod IP map
+      while IFS='|' read -r ns_name ipv4_ips ipv6_ips interface_count proc_count mtime active; do
+        [ -z "$ns_name" ] && continue
         
-        if [ "$OLD_EMPTY_NS" != "0" ] && [ "$OLD_EMPTY_NS" != "null" ] && [ "$OLD_EMPTY_NS" != "" ]; then
-          say "[ISSUE] Found $OLD_EMPTY_NS network namespace(s) with no interfaces and older than 1 hour (likely leaks)"
-          # List the orphaned namespaces with their ages
-          jq -r --arg now "$CURRENT_TIME" '.[] | select(.interface_count == 0 and (($now | tonumber) - .mtime) > 3600) | "  - `\(.name)` (age: \(($now | tonumber) - .mtime | . / 3600 | floor)h \(($now | tonumber) - .mtime | . % 3600 / 60 | floor)m)"' "$NODE_DIR/node_netns_details.json" 2>/dev/null | while read -r line; do
-            say "$line"
-          done || true
-        elif [ "$EMPTY_NS" -gt 10 ]; then
-          say "[WARN] Found $EMPTY_NS network namespace(s) with no interfaces (may be in cleanup or detection issue)"
-        else
-          say "[INFO] Found $EMPTY_NS network namespace(s) with no interfaces (may be in cleanup)"
+        matched=0
+        matched_pod=""
+        
+        # Check IPv4 IPs against pod map
+        if [ -n "$ipv4_ips" ] && [ "$ipv4_ips" != "null" ] && [ -s "$NODE_DIR/node_pod_ip_map.txt" ]; then
+          for ip in $(echo "$ipv4_ips" | tr ',' ' '); do
+            [ -z "$ip" ] && continue
+            owner=$(grep -m1 "^$ip " "$NODE_DIR/node_pod_ip_map.txt" 2>/dev/null | awk '{print $2}' || echo "")
+            if [ -n "$owner" ]; then
+              matched=1
+              matched_pod="$owner"
+              break
+            fi
+          done
         fi
-      else
-        # Can't determine age, just report count
-        if [ "$EMPTY_NS" -gt 10 ]; then
-          say "[WARN] Found $EMPTY_NS network namespace(s) with no interfaces (may be in cleanup or detection issue)"
-        else
-          say "[INFO] Found $EMPTY_NS network namespace(s) with no interfaces (may be in cleanup)"
+        
+        # Check IPv6 IPs if no IPv4 match
+        if [ "$matched" -eq 0 ] && [ -n "$ipv6_ips" ] && [ "$ipv6_ips" != "null" ] && [ -s "$NODE_DIR/node_pod_ipv6_map.txt" ]; then
+          for ipv6 in $(echo "$ipv6_ips" | tr ',' ' '); do
+            [ -z "$ipv6" ] && continue
+            ipv6_normalized=$(echo "$ipv6" | tr -d '[]' || echo "$ipv6")
+            owner=$(grep -m1 "^$ipv6_normalized " "$NODE_DIR/node_pod_ipv6_map.txt" 2>/dev/null | awk '{print $2}' || echo "")
+            if [ -n "$owner" ]; then
+              matched=1
+              matched_pod="$owner"
+              break
+            fi
+          done
         fi
+        
+        if [ "$matched" -eq 1 ]; then
+          MATCHED_COUNT=$((MATCHED_COUNT + 1))
+        else
+          # No IP match - check if truly orphaned
+          age_seconds=0
+          if [ "$CURRENT_TIME" != "0" ] && [ "$mtime" != "0" ] && [ "$mtime" != "null" ]; then
+            age_seconds=$((CURRENT_TIME - mtime))
+          fi
+          age_hours=$((age_seconds / 3600))
+          age_mins=$(((age_seconds % 3600) / 60))
+          
+          if [ -z "$ipv4_ips" ] && [ -z "$ipv6_ips" ] || [ "$ipv4_ips" = "null" ] || [ "$ipv6_ips" = "null" ]; then
+            # No IPs at all - definitely orphaned if old enough
+            if [ "$age_seconds" -gt 3600 ]; then
+              ORPHANED_COUNT=$((ORPHANED_COUNT + 1))
+              ORPHANED_LIST="${ORPHANED_LIST}  - \`${ns_name}\` (no IPs, age: ${age_hours}h ${age_mins}m, processes: ${proc_count})"$'\n'
+            fi
+          elif [ "$proc_count" = "0" ] || [ "$proc_count" = "null" ] || [ -z "$proc_count" ]; then
+            # Has IPs but no matching pod AND no processes - likely orphaned if old enough
+            if [ "$age_seconds" -gt 3600 ]; then
+              ORPHANED_COUNT=$((ORPHANED_COUNT + 1))
+              ip_list=""
+              [ -n "$ipv4_ips" ] && [ "$ipv4_ips" != "null" ] && ip_list="${ip_list}${ipv4_ips}"
+              [ -n "$ipv6_ips" ] && [ "$ipv6_ips" != "null" ] && ip_list="${ip_list} ${ipv6_ips}"
+              ORPHANED_LIST="${ORPHANED_LIST}  - \`${ns_name}\` (IPs: ${ip_list}, no pod match, no processes, age: ${age_hours}h ${age_mins}m)"$'\n'
+            fi
+          fi
+        fi
+      done < <(jq -r '.[] | "\(.name)|\(.ips.ipv4 // [] | join(","))|\(.ips.ipv6 // [] | join(","))|\(.interface_count)|\(.process_count)|\(.mtime)|\(.active)"' "$NODE_DIR/node_netns_details.json" 2>/dev/null)
+      
+      say "  - Matched to pods: $MATCHED_COUNT"
+      say "  - Orphaned (no matching pod): $ORPHANED_COUNT"
+      
+      if [ "$ORPHANED_COUNT" -gt 0 ]; then
+        echo >> "$REPORT"
+        say "[ISSUE] Found $ORPHANED_COUNT orphaned network namespace(s) (no matching pod, safe to delete after verification):"
+        echo -n "$ORPHANED_LIST" >> "$REPORT"
       fi
     fi
   fi
@@ -1742,9 +1821,10 @@ fi
 
 # CloudTrail API Diagnostics (if available)
 API_DIAG_DIR=""
-# Try to find the most recent API diag directory (same parent as bundle)
-if [ -d "$(dirname "$BUNDLE")" ]; then
-  API_DIAG_DIR=$(ls -dt "$(dirname "$BUNDLE")"/sgfp_api_diag_* 2>/dev/null | head -1 || echo "")
+# Try to find the most recent API diag directory (same data directory as bundle)
+DATA_DIR=$(dirname "$BUNDLE" 2>/dev/null || echo "")
+if [ -n "$DATA_DIR" ] && [ -d "$DATA_DIR" ]; then
+  API_DIAG_DIR=$(ls -dt "$DATA_DIR"/sgfp_api_diag_* 2>/dev/null | head -1 || echo "")
 fi
 
 if [ -n "$API_DIAG_DIR" ] && [ -d "$API_DIAG_DIR" ]; then
@@ -2087,6 +2167,70 @@ if [ -n "$NODE_DIR" ]; then
     if [ -n "$AWS_NODE_IMAGE" ] && [ "$AWS_NODE_IMAGE" != "" ]; then
       say "[INFO] aws-node image: $AWS_NODE_IMAGE"
     fi
+  fi
+  
+  # AWS VPC CNI configuration settings from amazon-vpc-cni ConfigMap
+  if [ -s "$NODE_DIR/node_aws_vpc_cni_config.json" ]; then
+    echo >> "$REPORT"
+    echo "### AWS VPC CNI Configuration" >> "$REPORT"
+    say "[INFO] AWS VPC CNI ConfigMap settings:"
+    
+    # Helper function to get ConfigMap value with default
+    get_cni_config() {
+      local key="$1"
+      local default="$2"
+      local value
+      value=$(jq -r ".data.\"$key\" // \"\"" "$NODE_DIR/node_aws_vpc_cni_config.json" 2>/dev/null || echo "")
+      if [ -n "$value" ] && [ "$value" != "null" ] && [ "$value" != "" ]; then
+        echo "$value"
+      else
+        echo "$default"
+      fi
+    }
+    
+    # Branch ENI cooldown (default: 30s, minimum enforced)
+    BRANCH_ENI_COOLDOWN=$(get_cni_config "branch-eni-cooldown" "")
+    if [ -n "$BRANCH_ENI_COOLDOWN" ] && [ "$BRANCH_ENI_COOLDOWN" != "" ]; then
+      say "  - Branch ENI cooldown: ${BRANCH_ENI_COOLDOWN}s"
+    else
+      say "  - Branch ENI cooldown: not set (default: 30s, minimum enforced)"
+    fi
+    
+    # IP target settings
+    WARM_IP_TARGET=$(get_cni_config "warm-ip-target" "")
+    MINIMUM_IP_TARGET=$(get_cni_config "minimum-ip-target" "")
+    WARM_PREFIX_TARGET=$(get_cni_config "warm-prefix-target" "")
+    
+    if [ -n "$WARM_IP_TARGET" ] && [ "$WARM_IP_TARGET" != "" ]; then
+      say "  - Warm IP target: $WARM_IP_TARGET"
+    else
+      say "  - Warm IP target: not set (default: 1)"
+    fi
+    
+    if [ -n "$MINIMUM_IP_TARGET" ] && [ "$MINIMUM_IP_TARGET" != "" ]; then
+      say "  - Minimum IP target: $MINIMUM_IP_TARGET"
+    else
+      say "  - Minimum IP target: not set (default: 0)"
+    fi
+    
+    if [ -n "$WARM_PREFIX_TARGET" ] && [ "$WARM_PREFIX_TARGET" != "" ]; then
+      say "  - Warm prefix target: $WARM_PREFIX_TARGET"
+    else
+      say "  - Warm prefix target: not set (default: 1, prefix delegation only)"
+    fi
+    
+    # Feature flags
+    ENABLE_NETWORK_POLICY=$(get_cni_config "enable-network-policy-controller" "")
+    
+    if [ -n "$ENABLE_NETWORK_POLICY" ] && [ "$ENABLE_NETWORK_POLICY" != "" ]; then
+      say "  - Network policy controller: $ENABLE_NETWORK_POLICY"
+    else
+      say "  - Network policy controller: not set (default: false)"
+    fi
+    
+    say "[INFO] Full ConfigMap: \`node_*/node_aws_vpc_cni_config.json\`"
+  else
+    say "[INFO] AWS VPC CNI ConfigMap not found or empty (using defaults)"
   fi
   
   # kube-proxy version
