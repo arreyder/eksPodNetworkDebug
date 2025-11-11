@@ -67,6 +67,42 @@ if [ -s "$POD_DIR/pod_eni_status.txt" ]; then
   fi
 fi
 
+# Check ENI readiness (comprehensive check)
+if [ -s "$POD_DIR/pod_eni_readiness.txt" ]; then
+  ENI_READY=$(grep "^ReadyForTraffic=" "$POD_DIR/pod_eni_readiness.txt" 2>/dev/null | cut -d= -f2- || echo "false")
+  if [ "$ENI_READY" = "true" ]; then
+    echo "[OK] ENI ready for traffic (type, status, SGs, and IP all configured)"
+  else
+    echo "[ISSUE] ENI not ready for traffic"
+    issues=$((issues+1))
+    # Show details
+    if [ -s "$POD_DIR/pod_eni_readiness.txt" ]; then
+      grep -v "^ReadyForTraffic=" "$POD_DIR/pod_eni_readiness.txt" | sed 's/^/  - /'
+    fi
+  fi
+fi
+
+# Check security group rules are present and configured
+if [ -s "$POD_DIR/pod_branch_eni_sgs_rules.json" ]; then
+  SG_RULES_COUNT=$(jq -r 'length' "$POD_DIR/pod_branch_eni_sgs_rules.json" 2>/dev/null || echo "0")
+  if [ "$SG_RULES_COUNT" -gt 0 ]; then
+    # Check if any security groups have ingress/egress rules
+    INGRESS_RULES_COUNT=$(jq -r '[.[].IpPermissions[]?] | length' "$POD_DIR/pod_branch_eni_sgs_rules.json" 2>/dev/null || echo "0")
+    EGRESS_RULES_COUNT=$(jq -r '[.[].IpPermissionsEgress[]?] | length' "$POD_DIR/pod_branch_eni_sgs_rules.json" 2>/dev/null || echo "0")
+    if [ "$INGRESS_RULES_COUNT" -gt 0 ] || [ "$EGRESS_RULES_COUNT" -gt 0 ]; then
+      echo "[OK] Security group rules present: $INGRESS_RULES_COUNT ingress, $EGRESS_RULES_COUNT egress"
+    else
+      echo "[WARN] Security groups attached but no ingress/egress rules found (may be default deny-all)"
+      warnings=$((warnings+1))
+    fi
+  else
+    echo "[WARN] Security group rules file empty or invalid"
+    warnings=$((warnings+1))
+  fi
+else
+  echo "[INFO] Security group rules not collected (ENI may not have pod ENI)"
+fi
+
 # Analyze timing: pod creation vs ENI attachment
 if [ -s "$POD_DIR/pod_timing.txt" ] && [ -s "$POD_DIR/pod_eni_attach_time.txt" ]; then
   POD_CREATED=$(grep "^CREATED=" "$POD_DIR/pod_timing.txt" 2>/dev/null | cut -d= -f2- || echo "")
@@ -573,6 +609,87 @@ if [ -n "$NODE_DIR" ] && [ -s "$NODE_DIR/node_netns_details.json" ]; then
         echo "[ISSUE] Found $ORPHANED_NS orphaned network namespace(s) (no matching pod, safe to delete)"
         echo "$ORPHANED_NS_LIST"
         issues=$((issues+1))
+      fi
+    fi
+    
+    # Check pod's network namespace completeness
+    if [ -n "$POD_IP" ] && [ "$POD_IP" != "unknown" ]; then
+      echo ""
+      echo "=== Pod Network Namespace Completeness Check ==="
+      POD_NS_COMPLETE=0
+      POD_NS_ISSUES=0
+      
+      # Find the pod's namespace by matching IP
+      POD_NS_NAME=$(jq -r --arg ip "$POD_IP" '.[] | select(.ips.ipv4[]? == $ip) | .name' "$NODE_DIR/node_netns_details.json" 2>/dev/null | head -1 || echo "")
+      
+      if [ -n "$POD_NS_NAME" ] && [ "$POD_NS_NAME" != "null" ]; then
+        echo "[INFO] Found pod network namespace: $POD_NS_NAME"
+        
+        # Get completeness data
+        POD_NS_COMPLETENESS=$(jq -r --arg name "$POD_NS_NAME" '.[] | select(.name == $name) | .completeness // {}' "$NODE_DIR/node_netns_details.json" 2>/dev/null || echo "{}")
+        
+        if [ "$POD_NS_COMPLETENESS" != "{}" ] && [ "$POD_NS_COMPLETENESS" != "null" ]; then
+          # Check default route
+          DEFAULT_ROUTE=$(echo "$POD_NS_COMPLETENESS" | jq -r '.default_route // ""' 2>/dev/null || echo "")
+          if [ -n "$DEFAULT_ROUTE" ] && [ "$DEFAULT_ROUTE" != "null" ] && [ "$DEFAULT_ROUTE" != "" ]; then
+            echo "[OK] Default route present: $DEFAULT_ROUTE"
+          else
+            echo "[ISSUE] Default route missing in pod network namespace"
+            POD_NS_ISSUES=$((POD_NS_ISSUES + 1))
+            issues=$((issues+1))
+          fi
+          
+          # Check eth0 interface state
+          ETH0_STATE=$(echo "$POD_NS_COMPLETENESS" | jq -r '.eth0_state // "NOT_FOUND"' 2>/dev/null || echo "NOT_FOUND")
+          if [ "$ETH0_STATE" = "UP" ]; then
+            echo "[OK] eth0 interface state: UP"
+          elif [ "$ETH0_STATE" = "NOT_FOUND" ]; then
+            echo "[ISSUE] eth0 interface not found in pod network namespace"
+            POD_NS_ISSUES=$((POD_NS_ISSUES + 1))
+            issues=$((issues+1))
+          else
+            echo "[ISSUE] eth0 interface state: $ETH0_STATE (expected: UP)"
+            POD_NS_ISSUES=$((POD_NS_ISSUES + 1))
+            issues=$((issues+1))
+          fi
+          
+          # Check route count
+          ROUTE_COUNT=$(echo "$POD_NS_COMPLETENESS" | jq -r '.route_count // 0' 2>/dev/null || echo "0")
+          if [ "$ROUTE_COUNT" -gt 0 ]; then
+            echo "[OK] Route count: $ROUTE_COUNT"
+          else
+            echo "[ISSUE] No routes found in pod network namespace (expected at least default route)"
+            POD_NS_ISSUES=$((POD_NS_ISSUES + 1))
+            issues=$((issues+1))
+          fi
+          
+          # Check interface states
+          INTERFACE_STATES=$(echo "$POD_NS_COMPLETENESS" | jq -r '.interface_states // ""' 2>/dev/null || echo "")
+          if [ -n "$INTERFACE_STATES" ] && [ "$INTERFACE_STATES" != "null" ] && [ "$INTERFACE_STATES" != "" ]; then
+            echo "[INFO] Interface states: $INTERFACE_STATES"
+            # Check for any DOWN interfaces (excluding lo)
+            if echo "$INTERFACE_STATES" | grep -qE '[^:]+:DOWN' && ! echo "$INTERFACE_STATES" | grep -qE 'lo:DOWN'; then
+              DOWN_IFACES=$(echo "$INTERFACE_STATES" | grep -E '[^:]+:DOWN' | grep -v 'lo:DOWN' || echo "")
+              if [ -n "$DOWN_IFACES" ]; then
+                echo "[WARN] Some interfaces are DOWN: $DOWN_IFACES"
+                warnings=$((warnings+1))
+              fi
+            fi
+          fi
+          
+          if [ "$POD_NS_ISSUES" -eq 0 ]; then
+            echo "[OK] Pod network namespace completeness: OK"
+            POD_NS_COMPLETE=1
+          else
+            echo "[ISSUE] Pod network namespace completeness: $POD_NS_ISSUES issue(s) found"
+          fi
+        else
+          echo "[WARN] Network namespace completeness data not available for pod namespace"
+          warnings=$((warnings+1))
+        fi
+      else
+        echo "[WARN] Could not find pod network namespace by IP ($POD_IP)"
+        warnings=$((warnings+1))
       fi
     fi
   fi

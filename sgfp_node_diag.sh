@@ -645,6 +645,43 @@ if [ "${TEMP_POD_AVAILABLE:-0}" = "1" ] && [ -n "${TEMP_POD_NAME:-}" ] && comman
     # Get process count in namespace
     NS_PROC_COUNT=$(get_namespace_process_count "$NS_NAME" "$TEMP_POD_NAME")
     
+    # Get network namespace completeness checks (routes, interface state, default route)
+    # Try to collect completeness even if active check failed - namespace file might still be accessible
+    NS_COMPLETENESS_JSON="{}"
+    if [ -n "$NS_FILE_PATH" ]; then
+      # Check for default route
+      NS_DEFAULT_ROUTE=$(kubectl exec "$TEMP_POD_NAME" -- sh -c "nsenter --net=$NS_FILE_PATH ip route show default 2>/dev/null || echo ''" 2>/dev/null | head -1 | tr -d '\r\n' || echo "")
+      
+      # Check interface states (UP/DOWN)
+      NS_INTERFACE_STATES=$(kubectl exec "$TEMP_POD_NAME" -- sh -c "nsenter --net=$NS_FILE_PATH ip -o link show 2>/dev/null | grep -E '^[0-9]+:' | awk '{print \$2\":\"\$9}' || echo ''" 2>/dev/null | tr -d '\r\n' || echo "")
+      
+      # Check for eth0 interface specifically (expected for pod ENI)
+      NS_ETH0_STATE_RAW=$(kubectl exec "$TEMP_POD_NAME" -- sh -c "nsenter --net=$NS_FILE_PATH ip link show eth0 2>/dev/null" 2>/dev/null || echo "")
+      if [ -n "$NS_ETH0_STATE_RAW" ]; then
+        NS_ETH0_STATE=$(echo "$NS_ETH0_STATE_RAW" | grep -oE 'state [A-Z]+' | cut -d' ' -f2 | head -1 || echo "UNKNOWN")
+        [ -z "$NS_ETH0_STATE" ] && NS_ETH0_STATE="UNKNOWN"
+      else
+        NS_ETH0_STATE="NOT_FOUND"
+      fi
+      
+      # Count routes (excluding local/broadcast)
+      NS_ROUTE_COUNT=$(kubectl exec "$TEMP_POD_NAME" -- sh -c "nsenter --net=$NS_FILE_PATH ip route show 2>/dev/null | grep -vE '^local|^broadcast|^multicast|^169\.254' | wc -l || echo 0" 2>/dev/null | tr -d '[:space:]\r\n' || echo "0")
+      [ -z "$NS_ROUTE_COUNT" ] && NS_ROUTE_COUNT="0"
+      
+      # Build completeness JSON
+      NS_COMPLETENESS_JSON=$(jq -n \
+        --arg default_route "$NS_DEFAULT_ROUTE" \
+        --arg eth0_state "$NS_ETH0_STATE" \
+        --arg route_count "$NS_ROUTE_COUNT" \
+        --arg interface_states "$NS_INTERFACE_STATES" \
+        '{
+          "default_route": ($default_route // ""),
+          "eth0_state": ($eth0_state // "UNKNOWN"),
+          "route_count": (try ($route_count | tonumber) catch 0),
+          "interface_states": ($interface_states // "")
+        }' 2>/dev/null || echo "{}")
+    fi
+    
     # Add to JSON
     jq --arg name "$NS_NAME" \
        --arg interfaces "$NS_INTERFACES" \
@@ -653,7 +690,8 @@ if [ "${TEMP_POD_AVAILABLE:-0}" = "1" ] && [ -n "${TEMP_POD_NAME:-}" ] && comman
        --arg active "$NS_ACTIVE" \
        --arg proc_count "$NS_PROC_COUNT" \
        --argjson ips_json "$NS_IPS_JSON" \
-      '. += [{"name": $name, "interface_count": ($interfaces | tonumber), "ip_count": ($ips | tonumber), "mtime": ($mtime | tonumber), "active": ($active | tonumber), "process_count": ($proc_count | tonumber), "ips": $ips_json}]' \
+       --argjson completeness "$NS_COMPLETENESS_JSON" \
+      '. += [{"name": $name, "interface_count": ($interfaces | tonumber), "ip_count": ($ips | tonumber), "mtime": ($mtime | tonumber), "active": ($active | tonumber), "process_count": ($proc_count | tonumber), "ips": $ips_json, "completeness": $completeness}]' \
       "$NETNS_JSON_TMP" > "${NETNS_JSON_TMP}.new" && mv "${NETNS_JSON_TMP}.new" "$NETNS_JSON_TMP"
   done < "$OUT/node_netns_list.txt"
   
@@ -692,6 +730,36 @@ elif [ -n "$NETNS_DIR" ] && command -v ip >/dev/null 2>&1; then
     # Get process count in namespace
     NS_PROC_COUNT=$(get_namespace_process_count "$NS_NAME" "")
     
+    # Get network namespace completeness checks (routes, interface state, default route)
+    # Try to collect completeness even if active check failed - namespace might still be accessible
+    NS_COMPLETENESS_JSON="{}"
+    if [ -n "$NS_NAME" ]; then
+      # Check for default route
+      NS_DEFAULT_ROUTE=$(ip netns exec "$NS_NAME" ip route show default 2>/dev/null | head -1 || echo "")
+      
+      # Check interface states (UP/DOWN)
+      NS_INTERFACE_STATES=$(ip netns exec "$NS_NAME" ip -o link show 2>/dev/null | grep -E '^[0-9]+:' | awk '{print $2":"$9}' || echo "")
+      
+      # Check for eth0 interface specifically (expected for pod ENI)
+      NS_ETH0_STATE=$(ip netns exec "$NS_NAME" ip link show eth0 2>/dev/null | grep -oE 'state [A-Z]+' | cut -d' ' -f2 || echo "NOT_FOUND")
+      
+      # Count routes (excluding local/broadcast)
+      NS_ROUTE_COUNT=$(ip netns exec "$NS_NAME" ip route show 2>/dev/null | grep -vE '^local|^broadcast|^multicast|^169\.254' | wc -l | tr -d '[:space:]' || echo "0")
+      
+      # Build completeness JSON
+      NS_COMPLETENESS_JSON=$(jq -n \
+        --arg default_route "$NS_DEFAULT_ROUTE" \
+        --arg eth0_state "$NS_ETH0_STATE" \
+        --arg route_count "$NS_ROUTE_COUNT" \
+        --arg interface_states "$NS_INTERFACE_STATES" \
+        '{
+          "default_route": ($default_route // ""),
+          "eth0_state": $eth0_state,
+          "route_count": ($route_count | tonumber),
+          "interface_states": ($interface_states // "")
+        }' 2>/dev/null || echo "{}")
+    fi
+    
     # Add to JSON
     jq --arg name "$NS_NAME" \
        --arg interfaces "$NS_INTERFACES" \
@@ -700,7 +768,8 @@ elif [ -n "$NETNS_DIR" ] && command -v ip >/dev/null 2>&1; then
        --arg active "$NS_ACTIVE" \
        --arg proc_count "$NS_PROC_COUNT" \
        --argjson ips_json "$NS_IPS_JSON" \
-      '. += [{"name": $name, "interface_count": ($interfaces | tonumber), "ip_count": ($ips | tonumber), "mtime": ($mtime | tonumber), "active": ($active | tonumber), "process_count": ($proc_count | tonumber), "ips": $ips_json}]' \
+       --argjson completeness "$NS_COMPLETENESS_JSON" \
+      '. += [{"name": $name, "interface_count": ($interfaces | tonumber), "ip_count": ($ips | tonumber), "mtime": ($mtime | tonumber), "active": ($active | tonumber), "process_count": ($proc_count | tonumber), "ips": $ips_json, "completeness": $completeness}]' \
       "$NETNS_JSON_TMP" > "${NETNS_JSON_TMP}.new" && mv "${NETNS_JSON_TMP}.new" "$NETNS_JSON_TMP"
   done
   

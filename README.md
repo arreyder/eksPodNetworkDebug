@@ -39,6 +39,9 @@ This toolkit collects comprehensive diagnostics for AWS EKS pods using Security 
 - **Source Pod Security Group Validation**: Checks security groups of source pods attempting to connect to identify mismatches
 - **Packet Capture Analysis**: Analyzes tcpdump/pcap files with pod IP mapping to identify communicating pods and local vs remote traffic
 - **Network Traffic Capture**: Automated script to capture network traffic from a pod's network namespace using tcpdump
+- **Cluster Pod Snapshot**: Comprehensive cluster-wide pod snapshot (IPs, ENIs, metadata) captured at diagnostic time for later analysis (packet captures, historical reference)
+- **Healthy Pod Baselines**: Save healthy pod diagnostic bundles as baselines for comparison with unhealthy pods, with normalized JSON format for automated analysis
+- **Investigation Tracking**: Structured investigation documents to track facts, unknowns, theories, and conclusions for pod connectivity issues
 
 ## Documentation
 
@@ -121,6 +124,12 @@ export AWS_REGION=us-west-2
 # Run everything: collect, API diag, report, analyze, and display
 # Output will be organized by kubectl context
 ./sgfp_doctor.sh <pod-name> -n default --minutes 60
+
+# Mark a healthy pod and save as baseline
+./sgfp_doctor.sh <pod-name> -n default --mark-healthy
+
+# Mark an unhealthy pod for comparison
+./sgfp_doctor.sh <pod-name> -n default --mark-unhealthy
 ```
 
 ### Option 2: Step-by-Step
@@ -318,10 +327,18 @@ Runs all diagnostics in sequence: collect → API diag → report → analyze �
 
 **Baseline Comparison**: If `SGFP_BASELINE_DIR` is set, the doctor script automatically captures an incident baseline snapshot and compares metrics with the baseline.
 
+**Health Status Marking**: Use `--mark-healthy` to automatically save the collection as a healthy baseline, or `--mark-unhealthy` to tag an unhealthy pod for later comparison.
+
 ```bash
 # With baseline comparison
 export SGFP_BASELINE_DIR=sgfp_baseline_morning_20251109_080000
 ./sgfp_doctor.sh <pod> -n <namespace> [--minutes N] [--days D] [--region R] [--skip-api] [--api-dir DIR]
+
+# Mark healthy pod and save as baseline
+./sgfp_doctor.sh <pod> -n <namespace> --mark-healthy
+
+# Mark unhealthy pod for comparison
+./sgfp_doctor.sh <pod> -n <namespace> --mark-unhealthy
 
 # Without baseline comparison
 ./sgfp_doctor.sh <pod> -n <namespace> [--minutes N] [--days D] [--region R] [--skip-api] [--api-dir DIR]
@@ -330,8 +347,16 @@ export SGFP_BASELINE_DIR=sgfp_baseline_morning_20251109_080000
 ### `sgfp_collect.sh` - Collection Orchestrator
 Collects pod, node, and AWS diagnostics into a bundle.
 
+**Health Status Marking**: Use `--mark-healthy` to automatically save as a healthy baseline, or `--mark-unhealthy` to tag the collection.
+
 ```bash
 ./sgfp_collect.sh -n <namespace> <pod-name>
+
+# Mark healthy and save as baseline
+./sgfp_collect.sh -n <namespace> --mark-healthy <pod-name>
+
+# Mark unhealthy for comparison
+./sgfp_collect.sh -n <namespace> --mark-unhealthy <pod-name>
 ```
 
 **Features:**
@@ -728,6 +753,103 @@ Checks security groups of source pods attempting to connect to identify mismatch
 - Provides recommendations for fixing mismatches
 
 **Note:** If source pods have been deleted/recreated since diagnostic collection, the script may not be able to retrieve their security groups. Run diagnostics while source pods are active for accurate results.
+
+## Cluster Pod Snapshot
+
+Each diagnostic bundle now includes a comprehensive cluster-wide pod snapshot (`cluster_pod_snapshot.json`) captured at the time of collection. This snapshot includes:
+
+- **Pod IPs**: IPv4, IPv6, and all IPs for each pod
+- **Pod Metadata**: Namespace, name, UID, node, phase, labels
+- **Pod ENI Information**: ENI ID, private IP, security groups
+- **Pod Status**: Ready condition, container IDs, timestamps
+- **Owner References**: Deployment/ReplicaSet information
+
+This snapshot is useful for:
+- **Packet Capture Analysis**: Map IPs in packet captures to pods even after pods have changed
+- **Historical Reference**: See what pods existed at the time of the diagnostic
+- **Cross-Referencing**: Link IPs, ENIs, and other identifiers across different diagnostic data
+
+### Querying the Pod Snapshot
+
+Use the `sgfp_query_pod_snapshot.sh` helper script to query the snapshot:
+
+```bash
+# Show snapshot metadata
+./sgfp_query_pod_snapshot.sh <bundle-dir>
+
+# Find pod by IP address
+./sgfp_query_pod_snapshot.sh <bundle-dir> ip 10.4.243.90
+
+# Find pods by name pattern
+./sgfp_query_pod_snapshot.sh <bundle-dir> name be-innkeeper
+
+# Find pod by ENI ID
+./sgfp_query_pod_snapshot.sh <bundle-dir> eni eni-081829d313cc36576
+
+# List all pods
+./sgfp_query_pod_snapshot.sh <bundle-dir> all
+```
+
+The snapshot file is located at: `<bundle-dir>/cluster_pod_snapshot.json`
+
+## Investigation Tracking
+
+Structured investigation documents help track facts, unknowns, theories, and conclusions for pod connectivity issues. These documents live in the `investigations/` directory and serve as a knowledge base for diagnosing problems.
+
+### Investigation Document Structure
+
+Each investigation document tracks:
+
+- **Known Facts**: Things we know are working/correct vs. broken/incorrect
+- **Unknowns**: Things we need to check or verify
+- **Theories & Hypotheses**: Possible explanations with supporting/contradicting evidence
+- **Observations**: Data points from diagnostic reports
+- **Conclusions**: What we've determined from analysis
+- **Data Sources**: References to diagnostic bundles and reports
+
+### Creating/Updating Investigations
+
+```bash
+# Create a new investigation from template
+cp investigations/template.md investigations/my-investigation.md
+
+# Update investigation with new diagnostic data
+./sgfp_update_investigation.sh investigations/my-investigation.md <bundle-dir> --status unhealthy
+```
+
+### Main Investigation Document
+
+- `investigations/pod-connectivity-issues.md` - Main investigation for pod connectivity problems
+  - Tracks the "restart fixes it" issue
+  - Documents theories about incomplete network namespace setup
+  - References diagnostic bundles and analysis documents
+
+### Investigation Template
+
+See `investigations/template.md` for a structured template you can copy for new investigations.
+
+### Checking Known Issues
+
+Use `sgfp_check_known_issues.sh` to check diagnostic bundles against known issues from GitHub, changelogs, and security advisories:
+
+```bash
+# Check a diagnostic bundle against known issues
+./sgfp_check_known_issues.sh <bundle-dir>
+```
+
+**What it checks**:
+- Component versions (Kubernetes, OS, kernel, aws-node, kube-proxy, CoreDNS)
+- Known GitHub issues (amazon-vpc-cni-k8s, amazon-linux-2023, kubernetes, coredns)
+- Security advisories (ALAS)
+- Version compatibility (e.g., kube-proxy must match Kubernetes version)
+- Pattern matching against known issue symptoms
+- Version-specific known problems
+
+**Output includes**:
+- Detected component versions
+- Relevant known issues with references
+- Pattern matches in diagnostic data
+- Recommendations for next steps
 
 ## Packet Capture Analysis
 

@@ -20,14 +20,25 @@ REPORTS_DIR="reports/${KUBECTL_CONTEXT}"
 mkdir -p "$DATA_DIR" "$REPORTS_DIR"
 
 NS="default"
+MARK_HEALTHY=0
+MARK_UNHEALTHY=0
 while getopts ":n:" opt; do
   case $opt in
     n) NS="$OPTARG" ;;
-    *) echo "usage: sgfp_collect.sh [-n namespace] <pod-name>"; exit 1 ;;
+    *) echo "usage: sgfp_collect.sh [-n namespace] [--mark-healthy] [--mark-unhealthy] <pod-name>"; exit 1 ;;
   esac
 done
 shift $((OPTIND-1))
-POD="${1:?usage: sgfp_collect.sh [-n namespace] <pod-name>}"
+# Handle long options (--mark-healthy, --mark-unhealthy)
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --mark-healthy) MARK_HEALTHY=1; shift ;;
+    --mark-unhealthy) MARK_UNHEALTHY=1; shift ;;
+    -n|--namespace) NS="${2:?}"; shift 2 ;;
+    *) break ;;
+  esac
+done
+POD="${1:?usage: sgfp_collect.sh [-n namespace] [--mark-healthy] [--mark-unhealthy] <pod-name>}"
 
 # 1) Pod diag
 ./sgfp_pod_diag.sh "$POD" "$NS" "$DATA_DIR"
@@ -76,6 +87,22 @@ if [ -s "$LATEST/pod_annotations.json" ] && jq -e 'has("vpc.amazonaws.com/pod-en
           jq -r '.NetworkInterfaces[0].Status // "unknown"' "$LATEST/pod_branch_eni_describe.json" > "$LATEST/pod_eni_status.txt" 2>/dev/null || echo "unknown" > "$LATEST/pod_eni_status.txt"
           jq -r '.NetworkInterfaces[0].Attachment.Status // "unknown"' "$LATEST/pod_branch_eni_describe.json" > "$LATEST/pod_eni_attachment_status.txt" 2>/dev/null || echo "unknown" > "$LATEST/pod_eni_attachment_status.txt"
           jq -r '.NetworkInterfaces[0].Attachment.AttachTime // "unknown"' "$LATEST/pod_branch_eni_describe.json" > "$LATEST/pod_eni_attach_time.txt" 2>/dev/null || echo "unknown" > "$LATEST/pod_eni_attach_time.txt"
+          
+          # Extract ENI readiness indicators
+          # For branch ENIs, check if InterfaceType is "branch" and Status is "in-use"
+          ENI_TYPE=$(jq -r '.NetworkInterfaces[0].InterfaceType // "unknown"' "$LATEST/pod_branch_eni_describe.json" 2>/dev/null || echo "unknown")
+          ENI_STATUS=$(jq -r '.NetworkInterfaces[0].Status // "unknown"' "$LATEST/pod_branch_eni_describe.json" 2>/dev/null || echo "unknown")
+          ENI_GROUPS_COUNT=$(jq -r '.NetworkInterfaces[0].Groups | length' "$LATEST/pod_branch_eni_describe.json" 2>/dev/null || echo "0")
+          ENI_PRIVATE_IP=$(jq -r '.NetworkInterfaces[0].PrivateIpAddress // "unknown"' "$LATEST/pod_branch_eni_describe.json" 2>/dev/null || echo "unknown")
+          
+          # Create ENI readiness summary
+          {
+            echo "InterfaceType=$ENI_TYPE"
+            echo "Status=$ENI_STATUS"
+            echo "SecurityGroupsCount=$ENI_GROUPS_COUNT"
+            echo "PrivateIpAddress=$ENI_PRIVATE_IP"
+            echo "ReadyForTraffic=$([ "$ENI_TYPE" = "branch" ] && [ "$ENI_STATUS" = "in-use" ] && [ "$ENI_GROUPS_COUNT" -gt 0 ] && [ "$ENI_PRIVATE_IP" != "unknown" ] && echo "true" || echo "false")"
+          } > "$LATEST/pod_eni_readiness.txt" 2>/dev/null || true
         fi
         
         # Extract security groups from ENI description
@@ -274,9 +301,88 @@ else
   echo "WARN: AWS diagnostics not found, skipping" >&2
 fi
 
+# 5) Collect comprehensive cluster-wide pod snapshot for later analysis (packet captures, etc.)
+echo "[COLLECT] Collecting cluster-wide pod snapshot..."
+if command -v kubectl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  SNAPSHOT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  SNAPSHOT_TMP=$(mktemp)
+  if kubectl get pods -A -o json 2>/dev/null | jq --arg timestamp "$SNAPSHOT_TIMESTAMP" --arg cluster "$KUBECTL_CONTEXT" '{
+    "metadata": {
+      "cluster": $cluster,
+      "timestamp": $timestamp,
+      "total_pods": (.items | length)
+    },
+    "pods": [
+      .items[] | {
+        "namespace": (.metadata.namespace // ""),
+        "name": (.metadata.name // ""),
+        "uid": (.metadata.uid // ""),
+        "node": (.spec.nodeName // ""),
+        "phase": (.status.phase // ""),
+        "ipv4": (.status.podIP // ""),
+        "ipv6": (try ([.status.podIPs[]? | select(.ip | test(":")) | .ip] | first) catch ""),
+        "all_ips": (try ([.status.podIPs[]?.ip // empty] | map(select(. != null and . != ""))) catch []),
+        "pod_eni_id": (try (.metadata.annotations."vpc.amazonaws.com/pod-eni" | fromjson | .[0].eniId // "") catch ""),
+        "pod_eni_private_ip": (try (.metadata.annotations."vpc.amazonaws.com/pod-eni" | fromjson | .[0].privateIp // "") catch ""),
+        "security_groups": (try ((.metadata.annotations."vpc.amazonaws.com/security-groups" // "") | split(",") | map(select(. != ""))) catch []),
+        "labels": (.metadata.labels // {}),
+        "creation_timestamp": (.metadata.creationTimestamp // ""),
+        "deletion_timestamp": (.metadata.deletionTimestamp // ""),
+        "owner_kind": (try (.metadata.ownerReferences[0].kind // "") catch ""),
+        "owner_name": (try (.metadata.ownerReferences[0].name // "") catch ""),
+        "container_ids": (try ([.status.containerStatuses[]? | .containerID // empty] | map(select(. != null and . != ""))) catch []),
+        "ready": (try ((.status.conditions[]? | select(.type == "Ready") | .status == "True") // false) catch false),
+        "ready_condition": (try ((.status.conditions[]? | select(.type == "Ready") | {
+          "status": .status,
+          "reason": (.reason // ""),
+          "message": (.message // "")
+        }) // null) catch null)
+      }
+    ]
+  }' > "$SNAPSHOT_TMP" 2>/dev/null; then
+    mv "$SNAPSHOT_TMP" "$MASTER/cluster_pod_snapshot.json"
+    POD_COUNT=$(jq -r '.pods | length' "$MASTER/cluster_pod_snapshot.json" 2>/dev/null || echo "0")
+    echo "[COLLECT] Collected snapshot of $POD_COUNT pod(s) at $SNAPSHOT_TIMESTAMP"
+  else
+    rm -f "$SNAPSHOT_TMP" 2>/dev/null || true
+    echo "[COLLECT] WARN: Failed to collect pod snapshot (jq query failed)"
+    echo '{"metadata":{"error":"jq query failed","timestamp":"'$SNAPSHOT_TIMESTAMP'","cluster":"'$KUBECTL_CONTEXT'"},"pods":[]}' > "$MASTER/cluster_pod_snapshot.json"
+  fi
+else
+  echo "[COLLECT] WARN: kubectl or jq not available, skipping pod snapshot"
+  echo '{"metadata":{"error":"kubectl or jq not available"},"pods":[]}' > "$MASTER/cluster_pod_snapshot.json"
+fi
+
+# 6) Mark collection as healthy/unhealthy if requested
+if [ "$MARK_HEALTHY" -eq 1 ] || [ "$MARK_UNHEALTHY" -eq 1 ]; then
+  HEALTH_STATUS=""
+  if [ "$MARK_HEALTHY" -eq 1 ]; then
+    HEALTH_STATUS="healthy"
+    echo "[COLLECT] Marking collection as HEALTHY and saving as baseline..."
+    if ./sgfp_save_healthy_baseline.sh "$MASTER" --label healthy 2>&1; then
+      echo "[COLLECT] ✓ Healthy baseline saved"
+    else
+      echo "[COLLECT] WARN: Failed to save healthy baseline" >&2
+    fi
+  elif [ "$MARK_UNHEALTHY" -eq 1 ]; then
+    HEALTH_STATUS="unhealthy"
+    echo "[COLLECT] Marking collection as UNHEALTHY..."
+  fi
+  
+  # Create health status metadata file in bundle
+  cat > "$MASTER/health_status.txt" <<EOF
+Status: $HEALTH_STATUS
+Marked at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+Pod: $POD
+Namespace: $NS
+EOF
+  echo "[COLLECT] Health status saved: $HEALTH_STATUS"
+fi
+
 echo
 echo "[COLLECT] Cluster: ${KUBECTL_CONTEXT}"
 echo "[COLLECT] All diagnostics in: $MASTER"
 echo "[COLLECT]   - $MASTER/pod_${POD}"
 [ -d "$MASTER/node_${NODE}" ] && echo "[COLLECT]   - $MASTER/node_${NODE}"
 [ -d "$MASTER/aws_${NODE}" ] && echo "[COLLECT]   - $MASTER/aws_${NODE}"
+[ -f "$MASTER/health_status.txt" ] && echo "[COLLECT]   - Health status: $(grep "^Status:" "$MASTER/health_status.txt" 2>/dev/null | cut -d: -f2- | tr -d ' ' || echo "unknown")"
