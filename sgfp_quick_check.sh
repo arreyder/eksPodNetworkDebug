@@ -11,6 +11,72 @@ log()  { printf "[QUICK] %s\n" "$*"; }
 warn() { printf "[QUICK] WARN: %s\n" "$*" >&2; }
 err()  { printf "[QUICK] ERROR: %s\n" "$*" >&2; }
 
+# Display security group rules
+show_sg_rules() {
+  local sg_id="$1"
+  local region="$2"
+  
+  SG_RULES_JSON=$(aws ec2 describe-security-groups --region "$region" --group-ids "$sg_id" --output json 2>/dev/null || echo "{}")
+  
+  if [ "$SG_RULES_JSON" = "{}" ] || ! echo "$SG_RULES_JSON" | jq -e '.SecurityGroups[0]' >/dev/null 2>&1; then
+    echo "    (could not retrieve rules)"
+    return
+  fi
+  
+  # Get ingress rules
+  INGRESS_COUNT=$(echo "$SG_RULES_JSON" | jq -r '.SecurityGroups[0].IpPermissions | length' 2>/dev/null || echo "0")
+  EGRESS_COUNT=$(echo "$SG_RULES_JSON" | jq -r '.SecurityGroups[0].IpPermissionsEgress | length' 2>/dev/null || echo "0")
+  
+  if [ "$INGRESS_COUNT" = "0" ] && [ "$EGRESS_COUNT" = "0" ]; then
+    echo "    (no rules found)"
+    return
+  fi
+  
+  # Display ingress rules
+  if [ "$INGRESS_COUNT" -gt 0 ] 2>/dev/null; then
+    echo "    Ingress rules ($INGRESS_COUNT):"
+    echo "$SG_RULES_JSON" | jq -r '.SecurityGroups[0].IpPermissions[]? | 
+      "      - " + 
+      (if .IpProtocol == "-1" then "ALL" else .IpProtocol end) + 
+      " | " + 
+      (if .FromPort == null then "all ports" else "ports " + (.FromPort | tostring) + (if .ToPort != null and .ToPort != .FromPort then "-" + (.ToPort | tostring) else "" end) end) + 
+      " | " + 
+      (if .UserIdGroupPairs != null and (.UserIdGroupPairs | length) > 0 then 
+        "SG: " + (.UserIdGroupPairs | map(.GroupId // .GroupName // "unknown") | join(", ")) 
+      elif .IpRanges != null and (.IpRanges | length) > 0 then 
+        "CIDR: " + (.IpRanges | map(.CidrIp // "unknown") | join(", ")) 
+      elif .Ipv6Ranges != null and (.Ipv6Ranges | length) > 0 then 
+        "IPv6: " + (.Ipv6Ranges | map(.CidrIpv6 // "unknown") | join(", ")) 
+      else 
+        "all sources" 
+      end)' 2>/dev/null | while IFS= read -r rule; do
+      echo "$rule"
+    done
+  fi
+  
+  # Display egress rules
+  if [ "$EGRESS_COUNT" -gt 0 ] 2>/dev/null; then
+    echo "    Egress rules ($EGRESS_COUNT):"
+    echo "$SG_RULES_JSON" | jq -r '.SecurityGroups[0].IpPermissionsEgress[]? | 
+      "      - " + 
+      (if .IpProtocol == "-1" then "ALL" else .IpProtocol end) + 
+      " | " + 
+      (if .FromPort == null then "all ports" else "ports " + (.FromPort | tostring) + (if .ToPort != null and .ToPort != .FromPort then "-" + (.ToPort | tostring) else "" end) end) + 
+      " | " + 
+      (if .UserIdGroupPairs != null and (.UserIdGroupPairs | length) > 0 then 
+        "SG: " + (.UserIdGroupPairs | map(.GroupId // .GroupName // "unknown") | join(", ")) 
+      elif .IpRanges != null and (.IpRanges | length) > 0 then 
+        "CIDR: " + (.IpRanges | map(.CidrIp // "unknown") | join(", ")) 
+      elif .Ipv6Ranges != null and (.Ipv6Ranges | length) > 0 then 
+        "IPv6: " + (.Ipv6Ranges | map(.CidrIpv6 // "unknown") | join(", ")) 
+      else 
+        "all destinations" 
+      end)' 2>/dev/null | while IFS= read -r rule; do
+      echo "$rule"
+    done
+  fi
+}
+
 # Parse arguments (similar to sgfp_collect.sh and sgfp_doctor.sh)
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -154,6 +220,9 @@ if [ -n "$ENI_ID" ] && [ "$ENI_ID" != "null" ] && [ "$ENI_ID" != "" ]; then
         else
           echo "  - $SG_ID"
         fi
+        
+        # Display rules for this security group
+        show_sg_rules "$SG_ID" "$REGION"
       done
     else
       warn "Could not read SGs from branch ENI"
@@ -469,7 +538,7 @@ if [ "$SHOW_CONNECTIONS" -eq 1 ]; then
       fi
       
       # Format and display connections
-      grep -v '^[[:space:]]*$' "$CONNTRACK_FILTERED" 2>/dev/null | head -10 | while IFS= read -r line || [ -n "$line" ]; do
+      grep -v '^[[:space:]]*$' "$CONNTRACK_FILTERED" 2>/dev/null | head -20 | while IFS= read -r line || [ -n "$line" ]; do
         [ -z "$line" ] && continue
         
         # Extract conntrack fields
@@ -528,8 +597,8 @@ if [ "$SHOW_CONNECTIONS" -eq 1 ]; then
         fi
       done
       
-      if [ "$CONNTRACK_COUNT" -gt 10 ]; then
-        log "... and $((CONNTRACK_COUNT - 10)) more connection(s)"
+      if [ "$CONNTRACK_COUNT" -gt 20 ]; then
+        log "... and $((CONNTRACK_COUNT - 20)) more connection(s)"
       fi
     else
       if [ "$CONNTRACK_COLLECTED" -eq 0 ]; then
